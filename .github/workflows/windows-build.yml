@@ -1,0 +1,35 @@
+name: Build Windows App
+
+# This tells the robot to run whenever you update your code
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-windows:
+    # This spins up a blank Windows computer in the cloud
+    runs-on: windows-latest
+
+    steps:
+    - name: Grab the code
+      uses: actions/checkout@v4
+
+    - name: Install Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11' 
+
+    - name: Install PyInstaller and PyQt6
+      run: |
+        python -m pip install --upgrade pip
+        pip install PyQt6 pyinstaller
+
+    - name: Build the .exe
+      # IMPORTANT: If your python file is not named hex_game.py, change it here!
+      run: pyinstaller --onefile --windowed hex_game.py
+
+    - name: Save the finished game
+      uses: actions/upload-artifact@v4
+      with:
+        name: HexGame-Windows
+        path: dist/*.exe
