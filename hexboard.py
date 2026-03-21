@@ -1,9 +1,12 @@
 import sys
 import math
+import json
+import base64
 from PyQt6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene, 
                              QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
-                             QCheckBox, QWidget, QComboBox)
-from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF, QBrush, QPixmap
+                             QCheckBox, QWidget, QComboBox, QLineEdit, QTextEdit,
+                             QScrollArea)
+from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF, QBrush, QPixmap, QKeySequence
 from PyQt6.QtCore import Qt, QPointF, QEvent, QTimer
 
 class InfiniteHexScene(QGraphicsScene):
@@ -15,6 +18,30 @@ class InfiniteHexScene(QGraphicsScene):
         self.hovered_hex = None
         self.show_highlights = True
         self.render_mode = "Tic-Tac-Toe" 
+        self.win_border_type = "Highlight Each"
+        self.last_move_style = "Transparent"
+        
+        self.bg_color_name = "White"
+        self.border_color_name = "Black"
+        
+        self.bg_colors = {
+            "White": "#ffffff",
+            "Dark": "#121212",
+            "Paper": "#f4f1ea",
+            "Slate": "#263238"
+        }
+        
+        self.border_colors = {
+            "Black": "#000000",
+            "White": "#ffffff",
+            "Gray": "#9e9e9e",
+            "None": "None"
+        }
+        
+        self.placement_animation_type = "None"
+        self.active_animations = {}
+        self.anim_timer = QTimer()
+        self.anim_timer.timeout.connect(self._step_animations)
         
         # Color mapping for players and threats
         self.color_map = {
@@ -46,11 +73,31 @@ class InfiniteHexScene(QGraphicsScene):
         
         self.x_threats = set()
         self.o_threats = set()
+        self.winning_hexes = set()
         self.history = []
+        
+        self.active_animations = {}
+        if hasattr(self, 'anim_timer'):
+            self.anim_timer.stop()
         
         self.invalidate()
         if hasattr(self, 'on_state_change') and self.on_state_change:
             self.on_state_change()
+
+    def _step_animations(self):
+        to_remove = []
+        for coords in self.active_animations:
+            self.active_animations[coords] += 0.08
+            if self.active_animations[coords] >= 1.0:
+                self.active_animations[coords] = 1.0
+                to_remove.append(coords)
+                
+        for coords in to_remove:
+            del self.active_animations[coords]
+            
+        self.invalidate()
+        if not self.active_animations:
+            self.anim_timer.stop()
 
     def undo_move(self):
         if not self.history or self.game_over:
@@ -63,6 +110,9 @@ class InfiniteHexScene(QGraphicsScene):
         self.pieces_placed_this_turn = last_state['pieces_placed_this_turn']
         self.current_turn_moves = last_state['current_turn_moves']
         self.last_turn_moves = last_state['last_turn_moves']
+        
+        self.active_animations.clear()
+        self.anim_timer.stop()
         
         self.update_threats()
         self.invalidate()
@@ -146,14 +196,17 @@ class InfiniteHexScene(QGraphicsScene):
         
         for dir1, dir2 in directions:
             count = 1
+            winning_line = [(q, r)]
             for dq, dr in (dir1, dir2):
                 cur_q, cur_r = q + dq, r + dr
                 while self.board.get((cur_q, cur_r)) == player:
                     count += 1
+                    winning_line.append((cur_q, cur_r))
                     cur_q += dq
                     cur_r += dr
                     
             if count >= 6:
+                self.winning_hexes = set(winning_line)
                 return True
         return False
 
@@ -181,6 +234,11 @@ class InfiniteHexScene(QGraphicsScene):
                 self.board[(q, r)] = self.current_player
                 self.pieces_placed_this_turn += 1
                 self.current_turn_moves.append((q, r))
+                
+                if self.placement_animation_type != "None":
+                    self.active_animations[(q, r)] = 0.0
+                    if not self.anim_timer.isActive():
+                        self.anim_timer.start(16)
                 
                 self.update_threats()
                 
@@ -212,7 +270,8 @@ class InfiniteHexScene(QGraphicsScene):
             super().mousePressEvent(event)
 
     def drawBackground(self, painter, rect):
-        painter.fillRect(rect, QColor("#ffffff"))
+        bg_hex = self.bg_colors.get(self.bg_color_name, "#ffffff")
+        painter.fillRect(rect, QColor(bg_hex))
         
         s = self.hex_size
         w = math.sqrt(3) * s
@@ -232,12 +291,17 @@ class InfiniteHexScene(QGraphicsScene):
         x_threat = self.color_map[self.p1_color_name]["threat"]
         o_threat = self.color_map[self.p2_color_name]["threat"]
 
-        hex_pen = QPen(QColor("#000000"), 1.5)
+        border_val = self.border_colors.get(self.border_color_name, "#000000")
+        if border_val == "None":
+            hex_pen = QPen(Qt.PenStyle.NoPen)
+        else:
+            hex_pen = QPen(QColor(border_val), 1.5)
+
         x_pen = QPen(QColor(x_base), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         o_pen = QPen(QColor(o_base), 4, Qt.PenStyle.SolidLine)
         
-        hover_brush = QBrush(QColor("#eeeeee")) 
-        last_move_brush = QBrush(QColor("#fff9c4"))     
+        hover_brush = QBrush(QColor(238, 238, 238, 180)) # Slightly transparent to blend with any background
+        last_move_brush = QBrush(QColor(255, 249, 196, 200))     
         x_threat_brush = QBrush(QColor(x_threat))      
         o_threat_brush = QBrush(QColor(o_threat))      
         both_threat_brush = QBrush(QColor("#e1bee7"))   
@@ -247,6 +311,9 @@ class InfiniteHexScene(QGraphicsScene):
 
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
+        # Define axial directions to neighbors (from top-right, clockwise)
+        neighbor_dirs = [(1, -1), (1, 0), (0, 1), (-1, 1), (-1, 0), (0, -1)]
+
         for row in range(min_row, max_row + 1):
             for col in range(min_col, max_col + 1):
                 x = col * w
@@ -266,43 +333,136 @@ class InfiniteHexScene(QGraphicsScene):
                 q = raw_q - self.origin_offset[0]
                 r = raw_r - self.origin_offset[1]
                 
-                if (q, r) in self.board and self.render_mode == "Color Fill":
-                    painter.setBrush(x_fill_brush if self.board[(q, r)] == 'X' else o_fill_brush)
-                elif (q, r) == self.hovered_hex and (q, r) not in self.board:
-                    painter.setBrush(hover_brush)
-                elif (q, r) in self.board and (q, r) in self.last_turn_moves:
-                    painter.setBrush(last_move_brush)
+                # --- 1. DETERMINE BACKGROUND BRUSH ---
+                bg_brush = Qt.BrushStyle.NoBrush
+                if (q, r) == self.hovered_hex and (q, r) not in self.board:
+                    bg_brush = hover_brush
+                elif (q, r) in self.board and (q, r) in self.last_turn_moves and self.last_move_style == "Transparent":
+                    bg_brush = last_move_brush
                 elif (q, r) not in self.board and self.show_highlights:
                     is_x_threat = (q, r) in self.x_threats
                     is_o_threat = (q, r) in self.o_threats
-                    
                     if is_x_threat and is_o_threat:
-                        painter.setBrush(both_threat_brush)
+                        bg_brush = both_threat_brush
                     elif is_x_threat:
-                        painter.setBrush(x_threat_brush)
+                        bg_brush = x_threat_brush
                     elif is_o_threat:
-                        painter.setBrush(o_threat_brush)
-                    else:
-                        painter.setBrush(Qt.BrushStyle.NoBrush)
-                else:
-                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                        bg_brush = o_threat_brush
                 
+                # --- 2. DRAW BASE HEX (Border & Non-piece background) ---
+                painter.setBrush(bg_brush)
                 painter.setPen(hex_pen)
                 painter.drawPolygon(QPolygonF(points))
                 
-                if (q, r) in self.board and self.render_mode == "Tic-Tac-Toe":
-                    player = self.board[(q, r)]
-                    radius = s * 0.55 
+                # --- 3. DRAW PIECE (Animated if applicable) ---
+                if (q, r) in self.board:
+                    painter.save()
+                    anim_progress = 1.0
+                    anim_type = "None"
                     
-                    if player == 'X':
-                        painter.setPen(x_pen)
-                        offset = radius * 0.707 
-                        painter.drawLine(QPointF(x - offset, y - offset), QPointF(x + offset, y + offset))
-                        painter.drawLine(QPointF(x - offset, y + offset), QPointF(x + offset, y - offset))
+                    if (q, r) in self.active_animations:
+                        anim_progress = self.active_animations[(q, r)]
+                        anim_type = self.placement_animation_type
+                        
+                        painter.translate(x, y)
+                        if anim_type == "Zoom In":
+                            painter.scale(anim_progress, anim_progress)
+                        elif anim_type == "Fade In":
+                            painter.setOpacity(anim_progress)
+                        elif anim_type == "Pop":
+                            if anim_progress < 0.7:
+                                s_anim = anim_progress / 0.7 * 1.2
+                            else:
+                                s_anim = 1.2 - ((anim_progress - 0.7) / 0.3) * 0.2
+                            painter.scale(s_anim, s_anim)
+                        elif anim_type == "Drop In":
+                            y_offset = -(h / 3.0) * (1.0 - anim_progress) 
+                            painter.translate(0, y_offset)
+                        painter.translate(-x, -y)
+                        
+                    player = self.board[(q, r)]
+                    
+                    if self.render_mode == "Color Fill":
+                        fill_brush = x_fill_brush if player == 'X' else o_fill_brush
+                        painter.setBrush(fill_brush)
+                        painter.setPen(hex_pen) 
+                        painter.drawPolygon(QPolygonF(points))
                     else:
-                        painter.setPen(o_pen)
-                        painter.drawEllipse(QPointF(x, y), radius, radius)
+                        radius = s * 0.55 
+                        if player == 'X':
+                            painter.setPen(x_pen)
+                            offset = radius * 0.707 
+                            painter.drawLine(QPointF(x - offset, y - offset), QPointF(x + offset, y + offset))
+                            painter.drawLine(QPointF(x - offset, y + offset), QPointF(x + offset, y - offset))
+                        else:
+                            painter.setPen(o_pen)
+                            painter.drawEllipse(QPointF(x, y), radius, radius)
+                                    
+                    painter.restore()
 
+        # Draw last move highlights (if applicable)
+        if self.last_turn_moves and self.last_move_style in ["Highlight Each", "Solid Line"]:
+            lm_pen = QPen(QColor("#ffee58"), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(lm_pen)
+            
+            for mq, mr in self.last_turn_moves:
+                raw_q = mq + self.origin_offset[0]
+                raw_r = mr + self.origin_offset[1]
+                row = raw_r
+                col = raw_q + (row // 2)
+                
+                x = col * w
+                y = row * h * 0.75
+                if row % 2 != 0:
+                    x += w / 2
+                    
+                points = [
+                    QPointF(x, y - s), QPointF(x + w/2, y - s/2), QPointF(x + w/2, y + s/2),
+                    QPointF(x, y + s), QPointF(x - w/2, y + s/2), QPointF(x - w/2, y - s/2),
+                ]
+                
+                if self.last_move_style == "Highlight Each":
+                    painter.drawPolygon(QPolygonF(points))
+                elif self.last_move_style == "Solid Line":
+                    for i, (dq, dr) in enumerate(neighbor_dirs):
+                        neighbor_q = mq + dq
+                        neighbor_r = mr + dr
+                        
+                        if (neighbor_q, neighbor_r) not in self.last_turn_moves:
+                            painter.drawLine(points[i], points[(i+1) % 6])
+
+        # Check if this hexagon is part of the winning path and draw boundaries on top
+        if self.winning_hexes and self.win_border_type != "None":
+            win_pen = QPen(QColor("#FFFF00"), 5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(win_pen)
+            
+            for wq, wr in self.winning_hexes:
+                raw_q = wq + self.origin_offset[0]
+                raw_r = wr + self.origin_offset[1]
+                row = raw_r
+                col = raw_q + (row // 2)
+                
+                x = col * w
+                y = row * h * 0.75
+                if row % 2 != 0:
+                    x += w / 2
+                    
+                points = [
+                    QPointF(x, y - s), QPointF(x + w/2, y - s/2), QPointF(x + w/2, y + s/2),
+                    QPointF(x, y + s), QPointF(x - w/2, y + s/2), QPointF(x - w/2, y - s/2),
+                ]
+                
+                if self.win_border_type == "Highlight Each":
+                    painter.drawPolygon(QPolygonF(points))
+                elif self.win_border_type == "Solid Line":
+                    for i, (dq, dr) in enumerate(neighbor_dirs):
+                        neighbor_q = wq + dq
+                        neighbor_r = wr + dr
+                        
+                        if (neighbor_q, neighbor_r) not in self.winning_hexes:
+                            painter.drawLine(points[i], points[(i+1) % 6])
 
 class HexBoardView(QGraphicsView):
     def __init__(self):
@@ -334,7 +494,10 @@ class HexBoardView(QGraphicsView):
         self.setup_ui_overlay()    
         self.setup_confirm_overlay() 
         self.setup_settings_confirm_overlay() 
-        self.setup_hud()           
+        self.setup_export_overlay()
+        self.setup_import_overlay()
+        self.setup_quit_confirm_overlay()
+        self.setup_hud()            
         self.setup_escape_menu()   
         
         self.update_center_coords()
@@ -353,9 +516,9 @@ class HexBoardView(QGraphicsView):
 
         self.menu_content = QWidget()
         self.menu_content.setStyleSheet("background: transparent; border: none;")
-        self.menu_content.setFixedWidth(400) # Keep config structured together
+        self.menu_content.setFixedWidth(430) 
         content_layout = QVBoxLayout(self.menu_content)
-        content_layout.setSpacing(15)
+        content_layout.setSpacing(10)
         
         title = QLabel("Config")
         title.setStyleSheet("font-size: 32px; font-weight: bold; color: white; border: none;")
@@ -364,42 +527,29 @@ class HexBoardView(QGraphicsView):
         content_layout.addWidget(title)
         content_layout.addSpacing(10)
 
-        # Helper to neatly add rows with Label on the Left and Input on the Right
+        # Helpers for styling rows and subtitles
+        def add_subtitle(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet("font-size: 22px; font-weight: bold; color: #aaaaaa; border: none; margin-top: 15px; margin-bottom: 5px;")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            content_layout.addWidget(lbl)
+
         def add_config_row(label_text, widget):
             row = QHBoxLayout()
             lbl = QLabel(label_text)
-            lbl.setStyleSheet("color: white; font-size: 18px; font-weight: bold; border: none;")
+            lbl.setStyleSheet("color: white; font-size: 16px; font-weight: bold; border: none;")
             row.addWidget(lbl)
             row.addStretch()
             row.addWidget(widget)
             content_layout.addLayout(row)
 
         cb_style = "QCheckBox::indicator { width: 22px; height: 22px; }"
-
-        self.cb_coords = QCheckBox()
-        self.cb_coords.setChecked(True)
-        self.cb_coords.setStyleSheet(cb_style)
-        self.cb_coords.toggled.connect(self.toggle_coords)
-        add_config_row("Coordinates:", self.cb_coords)
-        
-        self.cb_next_turn = QCheckBox()
-        self.cb_next_turn.setChecked(True)
-        self.cb_next_turn.setStyleSheet(cb_style)
-        self.cb_next_turn.toggled.connect(self.toggle_next_turn)
-        add_config_row("Next Turn:", self.cb_next_turn)
-        
-        self.cb_checks = QCheckBox()
-        self.cb_checks.setChecked(True)
-        self.cb_checks.setStyleSheet(cb_style)
-        self.cb_checks.toggled.connect(self.toggle_checks)
-        add_config_row("Checks:", self.cb_checks)
-
         dropdown_style = """
             QComboBox { 
                 color: white; 
                 border: 2px solid white; 
                 padding: 5px; 
-                font-size: 16px; 
+                font-size: 14px; 
                 border-radius: 3px; 
                 background: transparent;
                 min-width: 140px;
@@ -411,8 +561,32 @@ class HexBoardView(QGraphicsView):
             }
         """
 
-        color_options = ["Red", "Blue", "Green", "Yellow", "Purple", "Orange", "Black"]
+        # --- GAMEPLAY SETTINGS ---
+        add_subtitle("Gameplay")
 
+        self.cb_next_turn = QCheckBox()
+        self.cb_next_turn.setChecked(True)
+        self.cb_next_turn.setStyleSheet(cb_style)
+        self.cb_next_turn.toggled.connect(self.toggle_next_turn)
+        add_config_row("Show Next Turn:", self.cb_next_turn)
+        
+        self.cb_checks = QCheckBox()
+        self.cb_checks.setChecked(True)
+        self.cb_checks.setStyleSheet(cb_style)
+        self.cb_checks.toggled.connect(self.toggle_checks)
+        add_config_row("Show Threat Checks:", self.cb_checks)
+        
+        self.cb_coords = QCheckBox()
+        self.cb_coords.setChecked(True)
+        self.cb_coords.setStyleSheet(cb_style)
+        self.cb_coords.toggled.connect(self.toggle_coords)
+        add_config_row("Show Coordinates:", self.cb_coords)
+
+        # --- COLOR SETTINGS ---
+        add_subtitle("Color")
+
+        color_options = ["Red", "Blue", "Green", "Yellow", "Purple", "Orange", "Black"]
+        
         self.p1_dropdown = QComboBox()
         self.p1_dropdown.addItems(color_options)
         self.p1_dropdown.setCurrentText("Red")
@@ -427,12 +601,51 @@ class HexBoardView(QGraphicsView):
         self.p2_dropdown.currentTextChanged.connect(self.change_p2_color)
         add_config_row("P2 (O) Color:", self.p2_dropdown)
 
+        self.bg_dropdown = QComboBox()
+        self.bg_dropdown.addItems(["White", "Dark", "Paper", "Slate"])
+        self.bg_dropdown.setCurrentText("White")
+        self.bg_dropdown.setStyleSheet(dropdown_style)
+        self.bg_dropdown.currentTextChanged.connect(self.change_bg_color)
+        add_config_row("Background:", self.bg_dropdown)
+
+        self.border_dropdown = QComboBox()
+        self.border_dropdown.addItems(["Black", "White", "Gray", "None"])
+        self.border_dropdown.setCurrentText("Black")
+        self.border_dropdown.setStyleSheet(dropdown_style)
+        self.border_dropdown.currentTextChanged.connect(self.change_border_color)
+        add_config_row("Borders:", self.border_dropdown)
+
+        # --- VISUALS SETTINGS ---
+        add_subtitle("Visuals")
+
         self.mode_dropdown = QComboBox()
         self.mode_dropdown.addItems(["Tic-Tac-Toe", "Color Fill"])
         self.mode_dropdown.setStyleSheet(dropdown_style)
         self.mode_dropdown.currentTextChanged.connect(self.change_render_mode)
-        add_config_row("Mode:", self.mode_dropdown)
+        add_config_row("Piece Mode:", self.mode_dropdown)
         
+        self.anim_dropdown = QComboBox()
+        self.anim_dropdown.addItems(["None", "Zoom In", "Fade In", "Pop", "Drop In"])
+        self.anim_dropdown.setCurrentText("None")
+        self.anim_dropdown.setStyleSheet(dropdown_style)
+        self.anim_dropdown.currentTextChanged.connect(self.change_animation)
+        add_config_row("Placement Animation:", self.anim_dropdown)
+        
+        self.last_move_dropdown = QComboBox()
+        self.last_move_dropdown.addItems(["Transparent", "Highlight Each", "Solid Line", "None"])
+        self.last_move_dropdown.setCurrentText("Transparent")
+        self.last_move_dropdown.setStyleSheet(dropdown_style)
+        self.last_move_dropdown.currentTextChanged.connect(self.change_last_move_style)
+        add_config_row("Last Move Style:", self.last_move_dropdown)
+
+        self.win_border_dropdown = QComboBox()
+        self.win_border_dropdown.addItems(["Highlight Each", "Solid Line", "None"])
+        self.win_border_dropdown.setCurrentText("Highlight Each")
+        self.win_border_dropdown.setStyleSheet(dropdown_style)
+        self.win_border_dropdown.currentTextChanged.connect(self.change_win_border)
+        add_config_row("Win Border Style:", self.win_border_dropdown)
+
+        # --- BUTTONS ---
         btn_style = """
             QPushButton {
                 background-color: rgba(255, 255, 255, 220);
@@ -442,7 +655,7 @@ class HexBoardView(QGraphicsView):
                 font-size: 14px;
                 font-weight: bold;
                 color: #000000;
-                padding: 10px 30px;
+                padding: 10px 15px;
             }
             QPushButton:hover { background-color: rgba(230, 230, 230, 220); }
         """
@@ -457,10 +670,51 @@ class HexBoardView(QGraphicsView):
         resume_btn.setStyleSheet(btn_style)
         resume_btn.clicked.connect(self.toggle_esc_menu)
         
-        content_layout.addWidget(self.reset_settings_btn, 0, Qt.AlignmentFlag.AlignCenter)
-        content_layout.addWidget(resume_btn, 0, Qt.AlignmentFlag.AlignCenter)
+        export_btn = QPushButton("Export Config")
+        export_btn.setStyleSheet(btn_style)
+        export_btn.clicked.connect(self.export_config)
+
+        import_btn = QPushButton("Import Config")
+        import_btn.setStyleSheet(btn_style)
+        import_btn.clicked.connect(self.import_config)
+
+        quit_btn = QPushButton("Quit Game")
+        quit_btn.setStyleSheet(btn_style)
+        quit_btn.clicked.connect(self.show_quit_confirm)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addWidget(self.reset_settings_btn)
+        btn_layout.addWidget(resume_btn)
+        content_layout.addLayout(btn_layout)
         
-        self.esc_layout.addWidget(self.menu_content)
+        io_layout = QHBoxLayout()
+        io_layout.addWidget(export_btn)
+        io_layout.addWidget(import_btn)
+        content_layout.addLayout(io_layout)
+        
+        content_layout.addSpacing(10)
+        content_layout.addWidget(quit_btn, 0, Qt.AlignmentFlag.AlignCenter)
+        
+        # Wrap menu in a scroll area so it dynamically shrinks/scrolls on small screens
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setWidget(self.menu_content)
+        self.scroll_area.setStyleSheet("""
+            QScrollArea { background: transparent; border: none; }
+            QScrollBar:vertical { width: 10px; background: rgba(0,0,0,100); border-radius: 5px; margin: 0px 0px 0px 0px; }
+            QScrollBar::handle:vertical { background: rgba(255,255,255,150); border-radius: 5px; min-height: 20px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+        """)
+
+        self.esc_layout.addWidget(self.scroll_area, 0, Qt.AlignmentFlag.AlignCenter)
+
+    def update_esc_menu_size(self):
+        if hasattr(self, 'scroll_area') and hasattr(self, 'menu_content'):
+            content_h = self.menu_content.sizeHint().height()
+            available_h = self.height() - 80 
+            target_h = min(content_h, max(available_h, 200))
+            self.scroll_area.setFixedSize(465, target_h) # slightly wider to fit scrollbar comfortably
 
     def change_p1_color(self, text):
         self.scene.p1_color_name = text
@@ -476,11 +730,43 @@ class HexBoardView(QGraphicsView):
         self.viewport().update()
         self.update_turn_display()
 
+    def change_bg_color(self, text):
+        self.scene.bg_color_name = text
+        self.scene.invalidate()
+        self.viewport().update()
+
+    def change_border_color(self, text):
+        self.scene.border_color_name = text
+        self.scene.invalidate()
+        self.viewport().update()
+
     def change_render_mode(self, text):
         self.scene.render_mode = text
+        if text == "Color Fill":
+            item = self.last_move_dropdown.model().item(0)
+            if item: item.setEnabled(False)
+            if self.last_move_dropdown.currentText() == "Transparent":
+                self.last_move_dropdown.setCurrentText("Highlight Each")
+        else:
+            item = self.last_move_dropdown.model().item(0)
+            if item: item.setEnabled(True)
+
         self.scene.invalidate()
         self.viewport().update()
         self.update_turn_display()
+        
+    def change_animation(self, text):
+        self.scene.placement_animation_type = text
+
+    def change_last_move_style(self, text):
+        self.scene.last_move_style = text
+        self.scene.invalidate()
+        self.viewport().update()
+        
+    def change_win_border(self, text):
+        self.scene.win_border_type = text
+        self.scene.invalidate()
+        self.viewport().update()
 
     def toggle_coords(self, checked):
         self.center_coord_label.setVisible(checked)
@@ -496,7 +782,6 @@ class HexBoardView(QGraphicsView):
             self.hud_panel.hide()
         else:
             self.hud_panel.show()
-            self.hud_panel.adjustSize()
 
     def toggle_checks(self, checked):
         self.scene.show_highlights = checked
@@ -508,6 +793,7 @@ class HexBoardView(QGraphicsView):
             self.esc_menu.hide()
         else:
             self.esc_menu.resize(self.size())
+            self.update_esc_menu_size()
             self.esc_menu.show()
             self.esc_menu.raise_()
 
@@ -522,10 +808,78 @@ class HexBoardView(QGraphicsView):
         
         self.p1_dropdown.setCurrentText("Red")
         self.p2_dropdown.setCurrentText("Blue")
+        self.bg_dropdown.setCurrentText("White")
+        self.border_dropdown.setCurrentText("Black")
         self.mode_dropdown.setCurrentText("Tic-Tac-Toe")
+        self.anim_dropdown.setCurrentText("None")
+        self.last_move_dropdown.setCurrentText("Transparent")
+        self.win_border_dropdown.setCurrentText("Highlight Each")
 
         self.settings_confirm_overlay.hide()
         self.viewport().update()
+
+    def export_config(self):
+        config = {
+            "c": self.cb_coords.isChecked(),
+            "n": self.cb_next_turn.isChecked(),
+            "ch": self.cb_checks.isChecked(),
+            "p1": self.p1_dropdown.currentText(),
+            "p2": self.p2_dropdown.currentText(),
+            "bg": self.bg_dropdown.currentText(),
+            "bo": self.border_dropdown.currentText(),
+            "m": self.mode_dropdown.currentText(),
+            "a": self.anim_dropdown.currentText(),
+            "lms": self.last_move_dropdown.currentText(),
+            "wb": self.win_border_dropdown.currentText()
+        }
+        json_str = json.dumps(config)
+        code = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
+        
+        self.export_text.setText(code)
+        self.export_overlay.show()
+        self.export_overlay.raise_()
+
+    def copy_export_code(self):
+        QApplication.clipboard().setText(self.export_text.toPlainText())
+        self.export_overlay.hide()
+
+    def import_config(self):
+        self.import_input.clear()
+        self.import_error_label.setText("")
+        self.import_overlay.show()
+        self.import_overlay.raise_()
+
+    def process_import(self):
+        code = self.import_input.text().strip()
+        if not code:
+            return
+            
+        try:
+            json_str = base64.b64decode(code.encode('utf-8')).decode('utf-8')
+            config = json.loads(json_str)
+            
+            self.cb_coords.setChecked(config.get("c", True))
+            self.cb_next_turn.setChecked(config.get("n", True))
+            self.cb_checks.setChecked(config.get("ch", True))
+            
+            if "p1" in config: self.p1_dropdown.setCurrentText(config["p1"])
+            if "p2" in config: self.p2_dropdown.setCurrentText(config["p2"])
+            if "bg" in config: self.bg_dropdown.setCurrentText(config["bg"])
+            if "bo" in config: self.border_dropdown.setCurrentText(config["bo"])
+            if "m" in config: self.mode_dropdown.setCurrentText(config["m"])
+            if "a" in config: self.anim_dropdown.setCurrentText(config["a"])
+            
+            if "lms" in config:
+                lms_val = config["lms"]
+                if self.mode_dropdown.currentText() == "Color Fill" and lms_val == "Transparent":
+                    lms_val = "Highlight Each"
+                self.last_move_dropdown.setCurrentText(lms_val)
+                
+            if "wb" in config: self.win_border_dropdown.setCurrentText(config["wb"])
+            
+            self.import_overlay.hide()
+        except Exception:
+            self.import_error_label.setText("Invalid config code.")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
@@ -533,8 +887,13 @@ class HexBoardView(QGraphicsView):
         elif event.key() == Qt.Key.Key_R:
             self.confirm_overlay.show()
             self.confirm_overlay.raise_()
-        elif event.key() == Qt.Key.Key_Z:
+        elif event.matches(QKeySequence.StandardKey.Undo):
             self.scene.undo_move()
+        elif event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down, 
+                             Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D):
+            # Intercept arrow keys to stop native QGraphicsView scrolling
+            self.keys_pressed.add(event.key())
+            event.accept()
         else:
             self.keys_pressed.add(event.key())
             super().keyPressEvent(event)
@@ -542,7 +901,12 @@ class HexBoardView(QGraphicsView):
     def keyReleaseEvent(self, event):
         if event.key() in self.keys_pressed:
             self.keys_pressed.remove(event.key())
-        super().keyReleaseEvent(event)
+            
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down, 
+                           Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D):
+            event.accept()
+        else:
+            super().keyReleaseEvent(event)
 
     def smooth_pan(self):
         if not self.keys_pressed: return
@@ -597,7 +961,6 @@ class HexBoardView(QGraphicsView):
             r = raw_r - self.scene.origin_offset[1]
             
             self.mouse_coord_label.setText(f"Mouse:  ({q + r}, {-r})")
-            self.hud_panel.adjustSize()
             
             super().mouseMoveEvent(event)
 
@@ -612,6 +975,8 @@ class HexBoardView(QGraphicsView):
         """)
         
         layout = QVBoxLayout(self.hud_panel)
+        # Using SetFixedSize forces the QFrame to continuously auto-resize based on the layout contents!
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
         
@@ -697,7 +1062,6 @@ class HexBoardView(QGraphicsView):
             
         painter.end()
         self.turn_icon_label.setPixmap(pixmap)
-        self.hud_panel.adjustSize()
 
     def update_center_coords(self):
         if not hasattr(self, 'hud_panel'): return
@@ -710,7 +1074,6 @@ class HexBoardView(QGraphicsView):
         r = raw_r - self.scene.origin_offset[1]
         
         self.center_coord_label.setText(f"Center: ({q + r}, {-r})")
-        self.hud_panel.adjustSize() 
 
     def scrollContentsBy(self, dx, dy):
         super().scrollContentsBy(dx, dy)
@@ -822,7 +1185,6 @@ class HexBoardView(QGraphicsView):
         self.confirm_overlay.hide()
 
     def setup_settings_confirm_overlay(self):
-        """Custom popup frame for settings reset confirmation."""
         self.settings_confirm_overlay = QFrame(self)
         self.settings_confirm_overlay.setStyleSheet("""
             QFrame {
@@ -872,6 +1234,177 @@ class HexBoardView(QGraphicsView):
         self.settings_confirm_overlay.resize(250, 130)
         self.settings_confirm_overlay.hide()
 
+    def setup_quit_confirm_overlay(self):
+        self.quit_confirm_overlay = QFrame(self)
+        self.quit_confirm_overlay.setStyleSheet("""
+            QFrame {
+                background-color: rgba(255, 255, 255, 230); 
+                border: 2px solid black; 
+                border-radius: 10px;
+            }
+        """)
+        
+        layout = QVBoxLayout(self.quit_confirm_overlay)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+        
+        title = QLabel("Quit Game?")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; color: black; border: none; background: transparent;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        btn_container = QHBoxLayout()
+        btn_style = """
+            QPushButton {
+                background-color: rgba(255, 255, 255, 220);
+                border: 2px solid #000000;
+                border-radius: 8px;
+                font-family: monospace;
+                font-size: 14px;
+                font-weight: bold;
+                color: #000000;
+                padding: 10px;
+            }
+            QPushButton:hover { background-color: rgba(230, 230, 230, 220); }
+        """
+
+        yes_btn = QPushButton("Yes")
+        yes_btn.setStyleSheet(btn_style)
+        yes_btn.clicked.connect(QApplication.instance().quit)
+
+        no_btn = QPushButton("No")
+        no_btn.setStyleSheet(btn_style)
+        no_btn.clicked.connect(self.quit_confirm_overlay.hide)
+        
+        btn_container.addWidget(yes_btn)
+        btn_container.addWidget(no_btn)
+
+        layout.addWidget(title)
+        layout.addLayout(btn_container)
+        
+        self.quit_confirm_overlay.resize(250, 130)
+        self.quit_confirm_overlay.hide()
+
+    def show_quit_confirm(self):
+        self.quit_confirm_overlay.show()
+        self.quit_confirm_overlay.raise_()
+
+    def setup_export_overlay(self):
+        self.export_overlay = QFrame(self)
+        self.export_overlay.setStyleSheet("""
+            QFrame {
+                background-color: rgba(255, 255, 255, 240); 
+                border: 2px solid black; 
+                border-radius: 10px;
+            }
+        """)
+        
+        layout = QVBoxLayout(self.export_overlay)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+        
+        title = QLabel("Export Config")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; color: black; border: none; background: transparent;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        self.export_text = QTextEdit()
+        self.export_text.setReadOnly(True)
+        self.export_text.setStyleSheet("border: 1px solid gray; border-radius: 4px; background: white; font-family: monospace; font-size: 12px; color: black;")
+        self.export_text.setFixedHeight(120)
+        
+        btn_container = QHBoxLayout()
+        btn_style = """
+            QPushButton {
+                background-color: rgba(255, 255, 255, 220);
+                border: 2px solid #000000;
+                border-radius: 8px;
+                font-family: monospace;
+                font-size: 14px;
+                font-weight: bold;
+                color: #000000;
+                padding: 10px 15px;
+            }
+            QPushButton:hover { background-color: rgba(230, 230, 230, 220); }
+        """
+
+        copy_btn = QPushButton("Copy to Clipboard")
+        copy_btn.setStyleSheet(btn_style)
+        copy_btn.clicked.connect(self.copy_export_code)
+
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet(btn_style)
+        close_btn.clicked.connect(self.export_overlay.hide)
+        
+        btn_container.addWidget(copy_btn)
+        btn_container.addWidget(close_btn)
+
+        layout.addWidget(title)
+        layout.addWidget(self.export_text)
+        layout.addLayout(btn_container)
+        
+        self.export_overlay.resize(380, 260)
+        self.export_overlay.hide()
+
+    def setup_import_overlay(self):
+        self.import_overlay = QFrame(self)
+        self.import_overlay.setStyleSheet("""
+            QFrame {
+                background-color: rgba(255, 255, 255, 240); 
+                border: 2px solid black; 
+                border-radius: 10px;
+            }
+        """)
+        
+        layout = QVBoxLayout(self.import_overlay)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+        
+        title = QLabel("Import Config")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; color: black; border: none; background: transparent;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        self.import_input = QLineEdit()
+        self.import_input.setPlaceholderText("Paste config code here...")
+        self.import_input.setFixedHeight(40)
+        self.import_input.setStyleSheet("border: 1px solid gray; border-radius: 4px; background: white; font-family: monospace; font-size: 14px; color: black; padding: 5px;")
+        
+        self.import_error_label = QLabel("")
+        self.import_error_label.setStyleSheet("color: red; font-size: 14px; font-weight: bold; border: none; background: transparent;")
+        self.import_error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        btn_container = QHBoxLayout()
+        btn_style = """
+            QPushButton {
+                background-color: rgba(255, 255, 255, 220);
+                border: 2px solid #000000;
+                border-radius: 8px;
+                font-family: monospace;
+                font-size: 14px;
+                font-weight: bold;
+                color: #000000;
+                padding: 10px 15px;
+            }
+            QPushButton:hover { background-color: rgba(230, 230, 230, 220); }
+        """
+
+        import_btn = QPushButton("Import")
+        import_btn.setStyleSheet(btn_style)
+        import_btn.clicked.connect(self.process_import)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(btn_style)
+        cancel_btn.clicked.connect(self.import_overlay.hide)
+        
+        btn_container.addWidget(import_btn)
+        btn_container.addWidget(cancel_btn)
+
+        layout.addWidget(title)
+        layout.addWidget(self.import_input)
+        layout.addWidget(self.import_error_label)
+        layout.addLayout(btn_container)
+        
+        self.import_overlay.resize(380, 260)
+        self.import_overlay.hide()
+
     def show_win_screen(self, winner_text):
         color_name = winner_text.split(" ")[0]
         color_hex = self.scene.color_map.get(color_name, {"base": "#000000"})["base"]
@@ -919,11 +1452,27 @@ class HexBoardView(QGraphicsView):
             sx = (self.width() - self.settings_confirm_overlay.width()) // 2
             sy = (self.height() - self.settings_confirm_overlay.height()) // 2
             self.settings_confirm_overlay.move(sx, sy)
+            
+        if hasattr(self, 'quit_confirm_overlay'):
+            qx = (self.width() - self.quit_confirm_overlay.width()) // 2
+            qy = (self.height() - self.quit_confirm_overlay.height()) // 2
+            self.quit_confirm_overlay.move(qx, qy)
+            
+        if hasattr(self, 'export_overlay'):
+            ex = (self.width() - self.export_overlay.width()) // 2
+            ey = (self.height() - self.export_overlay.height()) // 2
+            self.export_overlay.move(ex, ey)
+            
+        if hasattr(self, 'import_overlay'):
+            ix = (self.width() - self.import_overlay.width()) // 2
+            iy = (self.height() - self.import_overlay.height()) // 2
+            self.import_overlay.move(ix, iy)
         
         self.update_bottom_button_pos()
             
         if hasattr(self, 'esc_menu') and self.esc_menu.isVisible():
             self.esc_menu.resize(self.size())
+            self.update_esc_menu_size()
             
         self.update_center_coords()
 
