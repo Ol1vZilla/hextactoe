@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene,
                              QCheckBox, QWidget, QComboBox, QLineEdit, QTextEdit,
                              QScrollArea)
 from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF, QBrush, QPixmap, QKeySequence
-from PyQt6.QtCore import Qt, QPointF, QEvent, QTimer
+from PyQt6.QtCore import Qt, QPointF, QEvent, QTimer, QRectF
 
 class InfiniteHexScene(QGraphicsScene):
     def __init__(self, parent=None):
@@ -18,8 +18,11 @@ class InfiniteHexScene(QGraphicsScene):
         self.hovered_hex = None
         self.show_highlights = True
         self.render_mode = "Tic-Tac-Toe" 
-        self.win_border_type = "Highlight Each"
+        self.board_style = "Flush"
+        self.win_border_type = "Yellow Pieces + Border"
+        
         self.last_move_style = "Transparent"
+        self.last_move_color_name = "Yellow"
         
         self.bg_color_name = "White"
         self.border_color_name = "Black"
@@ -28,14 +31,23 @@ class InfiniteHexScene(QGraphicsScene):
             "White": "#ffffff",
             "Dark": "#121212",
             "Paper": "#f4f1ea",
-            "Slate": "#263238"
+            "Navy": "#0e172a",
+            "Custom": "#ffffff"
         }
         
         self.border_colors = {
             "Black": "#000000",
             "White": "#ffffff",
-            "Gray": "#9e9e9e",
-            "None": "None"
+            "Gray": "#273044",
+            "None": "None",
+            "Custom": "#000000"
+        }
+
+        self.last_move_colors = {
+            "Yellow": "#ffee58",
+            "White": "#ffffff",
+            "Cyan": "#00ffff",
+            "Custom": "#ffee58"
         }
         
         self.placement_animation_type = "None"
@@ -43,21 +55,77 @@ class InfiniteHexScene(QGraphicsScene):
         self.anim_timer = QTimer()
         self.anim_timer.timeout.connect(self._step_animations)
         
-        # Color mapping for players and threats
+        # Time Control variables
+        self.tc_mode_config = "Unlimited"
+        self.tc_turn_sec = 30
+        self.tc_move_sec = 15
+        self.tc_match_m_config = 10
+        self.tc_match_i_config = 5
+        
+        self.active_tc_mode = "Unlimited"
+        self.active_time_left = 0
+        self.p1_time = 0
+        self.p2_time = 0
+        self.tc_match_inc_sec = 0
+        self.is_paused = False
+        
+        self.game_clock = QTimer()
+        self.game_clock.timeout.connect(self._tick_timer)
+        self.on_time_tick = None
+        
+        # Color mapping for players
         self.color_map = {
-            "Red": {"base": "#d32f2f", "threat": "#ffcdd2"},
-            "Blue": {"base": "#1976d2", "threat": "#bbdefb"},
-            "Green": {"base": "#388e3c", "threat": "#c8e6c9"},
-            "Yellow": {"base": "#fbc02d", "threat": "#fff9c4"},
-            "Purple": {"base": "#7b1fa2", "threat": "#e1bee7"},
-            "Orange": {"base": "#f57c00", "threat": "#ffe0b2"},
-            "Black": {"base": "#000000", "threat": "#9e9e9e"}
+            "Red": {"base": "#d32f2f"},
+            "Blue": {"base": "#1976d2"},
+            "Green": {"base": "#388e3c"},
+            "Yellow": {"base": "#fbc02d"},
+            "Purple": {"base": "#7b1fa2"},
+            "Orange": {"base": "#f57c00"},
+            "Black": {"base": "#000000"},
+            "Custom P1": {"base": "#d32f2f"},
+            "Custom P2": {"base": "#1976d2"}
         }
         self.p1_color_name = "Red"
         self.p2_color_name = "Blue"
         
         self.history = [] 
         self.reset_state()
+
+    def _tick_timer(self):
+        if self.game_over or self.active_tc_mode == "Unlimited" or self.is_paused:
+            return
+
+        if self.active_tc_mode in ["Turn Based", "Move Based"]:
+            self.active_time_left -= 1
+            if self.active_time_left <= 0:
+                self.active_time_left = 0
+                self.time_out_win()
+        elif self.active_tc_mode == "Match Based":
+            if self.current_player == 'X':
+                self.p1_time -= 1
+                if self.p1_time <= 0:
+                    self.p1_time = 0
+                    self.time_out_win('O')
+            else:
+                self.p2_time -= 1
+                if self.p2_time <= 0:
+                    self.p2_time = 0
+                    self.time_out_win('X')
+
+        if self.on_time_tick:
+            self.on_time_tick()
+
+    def time_out_win(self, winner=None):
+        self.game_over = True
+        self.anim_timer.stop()
+        self.game_clock.stop()
+        if not winner:
+            winner = 'O' if self.current_player == 'X' else 'X'
+        if self.on_win:
+            winner_color = self.p1_color_name if winner == 'X' else self.p2_color_name
+            self.on_win(f"{winner_color} ({winner})", True)
+        if self.on_state_change:
+            self.on_state_change()
 
     def reset_state(self):
         """Clears the board and resets all game variables."""
@@ -67,6 +135,7 @@ class InfiniteHexScene(QGraphicsScene):
         self.pieces_placed_this_turn = 0
         self.game_over = False
         self.origin_offset = (0, 0)
+        self.is_paused = False
         
         self.current_turn_moves = []
         self.last_turn_moves = []
@@ -76,13 +145,24 @@ class InfiniteHexScene(QGraphicsScene):
         self.winning_hexes = set()
         self.history = []
         
+        self.active_tc_mode = getattr(self, 'tc_mode_config', "Unlimited")
+        self.p1_time = getattr(self, 'tc_match_m_config', 10) * 60
+        self.p2_time = getattr(self, 'tc_match_m_config', 10) * 60
+        self.tc_match_inc_sec = getattr(self, 'tc_match_i_config', 5)
+        self.active_time_left = getattr(self, 'tc_turn_sec', 30) if self.active_tc_mode == "Turn Based" else getattr(self, 'tc_move_sec', 15)
+        
         self.active_animations = {}
         if hasattr(self, 'anim_timer'):
             self.anim_timer.stop()
+            
+        if hasattr(self, 'game_clock'):
+            self.game_clock.stop()
         
         self.invalidate()
         if hasattr(self, 'on_state_change') and self.on_state_change:
             self.on_state_change()
+        if hasattr(self, 'on_time_tick') and self.on_time_tick:
+            self.on_time_tick()
 
     def _step_animations(self):
         to_remove = []
@@ -111,6 +191,15 @@ class InfiniteHexScene(QGraphicsScene):
         self.current_turn_moves = last_state['current_turn_moves']
         self.last_turn_moves = last_state['last_turn_moves']
         
+        if self.active_tc_mode in ["Turn Based", "Move Based"]:
+            self.active_time_left = self.tc_turn_sec if self.active_tc_mode == "Turn Based" else self.tc_move_sec
+        elif self.active_tc_mode == "Match Based":
+            if self.p1_time <= 0: self.p1_time = 5
+            if self.p2_time <= 0: self.p2_time = 5
+            
+        if not self.game_over and self.board and self.active_tc_mode != "Unlimited":
+            self.game_clock.start(1000)
+            
         self.active_animations.clear()
         self.anim_timer.stop()
         
@@ -118,6 +207,8 @@ class InfiniteHexScene(QGraphicsScene):
         self.invalidate()
         if self.on_state_change:
             self.on_state_change()
+        if self.on_time_tick:
+            self.on_time_tick()
 
     def pixel_to_axial(self, x, y):
         q_float = (math.sqrt(3)/3 * x - 1/3 * y) / self.hex_size
@@ -235,6 +326,15 @@ class InfiniteHexScene(QGraphicsScene):
                 self.pieces_placed_this_turn += 1
                 self.current_turn_moves.append((q, r))
                 
+                # Start clock on the very first placement of the game
+                if self.is_first_turn and self.pieces_placed_this_turn == 1 and len(self.board) == 1:
+                    if self.active_tc_mode != "Unlimited":
+                        self.game_clock.start(1000)
+                        
+                if self.active_tc_mode == "Move Based":
+                    self.active_time_left = self.tc_move_sec
+                    if self.on_time_tick: self.on_time_tick()
+                
                 if self.placement_animation_type != "None":
                     self.active_animations[(q, r)] = 0.0
                     if not self.anim_timer.isActive():
@@ -247,9 +347,10 @@ class InfiniteHexScene(QGraphicsScene):
                     self.hovered_hex = None 
                     self.last_turn_moves = list(self.current_turn_moves) 
                     self.invalidate()
+                    self.game_clock.stop()
                     if self.on_win:
                         winner_color_name = self.p1_color_name if self.current_player == 'X' else self.p2_color_name
-                        self.on_win(f"{winner_color_name} ({self.current_player})")
+                        self.on_win(f"{winner_color_name} ({self.current_player})", False)
                     if self.on_state_change:
                         self.on_state_change()
                     return
@@ -257,11 +358,23 @@ class InfiniteHexScene(QGraphicsScene):
                 max_pieces = 1 if (self.is_first_turn and self.current_player == 'X') else 2
                 
                 if self.pieces_placed_this_turn >= max_pieces:
+                    # Apply match increment
+                    if self.active_tc_mode == "Match Based":
+                        if self.current_player == 'X':
+                            self.p1_time += self.tc_match_inc_sec
+                        else:
+                            self.p2_time += self.tc_match_inc_sec
+                            
                     self.current_player = 'O' if self.current_player == 'X' else 'X'
                     self.pieces_placed_this_turn = 0
                     self.is_first_turn = False
                     self.last_turn_moves = list(self.current_turn_moves) 
                     self.current_turn_moves = [] 
+                    
+                    if self.active_tc_mode == "Turn Based":
+                        self.active_time_left = self.tc_turn_sec
+                        
+                    if self.on_time_tick: self.on_time_tick()
                 
                 self.invalidate()
                 if self.on_state_change:
@@ -277,6 +390,11 @@ class InfiniteHexScene(QGraphicsScene):
         w = math.sqrt(3) * s
         h = 2 * s
         
+        # Calculate visual parameters for Flush vs Separated vs Circle
+        shrink_factor = 0.90 if self.board_style in ["Separated", "Circle"] else 1.0
+        draw_s = s * shrink_factor
+        draw_w = math.sqrt(3) * draw_s
+        
         left, right = rect.left(), rect.right()
         top, bottom = rect.top(), rect.bottom()
         
@@ -288,8 +406,6 @@ class InfiniteHexScene(QGraphicsScene):
         # Setup dynamic colors
         x_base = self.color_map[self.p1_color_name]["base"]
         o_base = self.color_map[self.p2_color_name]["base"]
-        x_threat = self.color_map[self.p1_color_name]["threat"]
-        o_threat = self.color_map[self.p2_color_name]["threat"]
 
         border_val = self.border_colors.get(self.border_color_name, "#000000")
         if border_val == "None":
@@ -300,31 +416,47 @@ class InfiniteHexScene(QGraphicsScene):
         x_pen = QPen(QColor(x_base), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         o_pen = QPen(QColor(o_base), 4, Qt.PenStyle.SolidLine)
         
-        hover_brush = QBrush(QColor(238, 238, 238, 180)) # Slightly transparent to blend with any background
-        last_move_brush = QBrush(QColor(255, 249, 196, 200))     
-        x_threat_brush = QBrush(QColor(x_threat))      
-        o_threat_brush = QBrush(QColor(o_threat))      
-        both_threat_brush = QBrush(QColor("#e1bee7"))   
+        # Neutral transparent hover brush
+        hover_brush = QBrush(QColor(128, 128, 128, 80)) 
+        
+        lm_color_hex = self.last_move_colors.get(self.last_move_color_name, "#ffee58")
+        lm_qcolor = QColor(lm_color_hex)
+        lm_qcolor.setAlpha(80) 
+        last_move_brush = QBrush(lm_qcolor)    
+        
+        # True transparent threat highlights based on base color
+        x_threat_c = QColor(x_base)
+        x_threat_c.setAlpha(80)
+        x_threat_brush = QBrush(x_threat_c)      
+        
+        o_threat_c = QColor(o_base)
+        o_threat_c.setAlpha(80)
+        o_threat_brush = QBrush(o_threat_c)      
+        
+        # Blend the two colors for overlapping threats
+        both_c = QColor((x_threat_c.red() + o_threat_c.red()) // 2, 
+                        (x_threat_c.green() + o_threat_c.green()) // 2, 
+                        (x_threat_c.blue() + o_threat_c.blue()) // 2, 80)
+        both_threat_brush = QBrush(both_c)   
         
         x_fill_brush = QBrush(QColor(x_base))
         o_fill_brush = QBrush(QColor(o_base))
 
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Define axial directions to neighbors (from top-right, clockwise)
-        neighbor_dirs = [(1, -1), (1, 0), (0, 1), (-1, 1), (-1, 0), (0, -1)]
 
         for row in range(min_row, max_row + 1):
             for col in range(min_col, max_col + 1):
+                # Grid coordinates use standard 'w' and 'h'
                 x = col * w
                 y = row * h * 0.75
                 
                 if row % 2 != 0:
                     x += w / 2
                     
+                # Visual points use 'draw_w' and 'draw_s' to separate them visually if selected
                 points = [
-                    QPointF(x, y - s), QPointF(x + w/2, y - s/2), QPointF(x + w/2, y + s/2),
-                    QPointF(x, y + s), QPointF(x - w/2, y + s/2), QPointF(x - w/2, y - s/2),
+                    QPointF(x, y - draw_s), QPointF(x + draw_w/2, y - draw_s/2), QPointF(x + draw_w/2, y + draw_s/2),
+                    QPointF(x, y + draw_s), QPointF(x - draw_w/2, y + draw_s/2), QPointF(x - draw_w/2, y - draw_s/2),
                 ]
                 
                 raw_q = col - (row // 2)
@@ -352,7 +484,11 @@ class InfiniteHexScene(QGraphicsScene):
                 # --- 2. DRAW BASE HEX (Border & Non-piece background) ---
                 painter.setBrush(bg_brush)
                 painter.setPen(hex_pen)
-                painter.drawPolygon(QPolygonF(points))
+                if self.board_style == "Circle":
+                    circle_radius = draw_s * 0.866
+                    painter.drawEllipse(QPointF(x, y), circle_radius, circle_radius)
+                else:
+                    painter.drawPolygon(QPolygonF(points))
                 
                 # --- 3. DRAW PIECE (Animated if applicable) ---
                 if (q, r) in self.board:
@@ -382,27 +518,45 @@ class InfiniteHexScene(QGraphicsScene):
                         
                     player = self.board[(q, r)]
                     
-                    if self.render_mode == "Color Fill":
-                        fill_brush = x_fill_brush if player == 'X' else o_fill_brush
-                        painter.setBrush(fill_brush)
-                        painter.setPen(hex_pen) 
-                        painter.drawPolygon(QPolygonF(points))
+                    # Override piece colors to yellow if it's a winning piece and the option is selected
+                    is_winning_piece = (q, r) in self.winning_hexes
+                    turn_yellow = self.win_border_type in ["Yellow Pieces + Border", "Yellow Pieces Only"]
+                    
+                    if is_winning_piece and turn_yellow:
+                        piece_color = QColor("#FFFF00")
+                        current_x_pen = QPen(piece_color, 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+                        current_o_pen = QPen(piece_color, 4, Qt.PenStyle.SolidLine)
+                        current_fill_brush = QBrush(piece_color)
                     else:
-                        radius = s * 0.55 
+                        current_x_pen = x_pen
+                        current_o_pen = o_pen
+                        current_fill_brush = x_fill_brush if player == 'X' else o_fill_brush
+                    
+                    if self.render_mode == "Color Fill":
+                        painter.setBrush(current_fill_brush)
+                        painter.setPen(hex_pen) 
+                        if self.board_style == "Circle":
+                            circle_radius = draw_s * 0.866
+                            painter.drawEllipse(QPointF(x, y), circle_radius, circle_radius)
+                        else:
+                            painter.drawPolygon(QPolygonF(points))
+                    else:
+                        painter.setBrush(Qt.BrushStyle.NoBrush) 
+                        radius = draw_s * 0.55 
                         if player == 'X':
-                            painter.setPen(x_pen)
+                            painter.setPen(current_x_pen)
                             offset = radius * 0.707 
                             painter.drawLine(QPointF(x - offset, y - offset), QPointF(x + offset, y + offset))
                             painter.drawLine(QPointF(x - offset, y + offset), QPointF(x + offset, y - offset))
                         else:
-                            painter.setPen(o_pen)
+                            painter.setPen(current_o_pen)
                             painter.drawEllipse(QPointF(x, y), radius, radius)
                                     
                     painter.restore()
 
         # Draw last move highlights (if applicable)
-        if self.last_turn_moves and self.last_move_style in ["Highlight Each", "Solid Line"]:
-            lm_pen = QPen(QColor("#ffee58"), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        if self.last_turn_moves and self.last_move_style == "Border":
+            lm_pen = QPen(QColor(lm_color_hex), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(lm_pen)
             
@@ -418,22 +572,18 @@ class InfiniteHexScene(QGraphicsScene):
                     x += w / 2
                     
                 points = [
-                    QPointF(x, y - s), QPointF(x + w/2, y - s/2), QPointF(x + w/2, y + s/2),
-                    QPointF(x, y + s), QPointF(x - w/2, y + s/2), QPointF(x - w/2, y - s/2),
+                    QPointF(x, y - draw_s), QPointF(x + draw_w/2, y - draw_s/2), QPointF(x + draw_w/2, y + draw_s/2),
+                    QPointF(x, y + draw_s), QPointF(x - draw_w/2, y + draw_s/2), QPointF(x - draw_w/2, y - draw_s/2),
                 ]
                 
-                if self.last_move_style == "Highlight Each":
+                if self.board_style == "Circle":
+                    circle_radius = draw_s * 0.866
+                    painter.drawEllipse(QPointF(x, y), circle_radius, circle_radius)
+                else:
                     painter.drawPolygon(QPolygonF(points))
-                elif self.last_move_style == "Solid Line":
-                    for i, (dq, dr) in enumerate(neighbor_dirs):
-                        neighbor_q = mq + dq
-                        neighbor_r = mr + dr
-                        
-                        if (neighbor_q, neighbor_r) not in self.last_turn_moves:
-                            painter.drawLine(points[i], points[(i+1) % 6])
 
         # Check if this hexagon is part of the winning path and draw boundaries on top
-        if self.winning_hexes and self.win_border_type != "None":
+        if self.winning_hexes and self.win_border_type not in ["None", "Yellow Pieces Only"]:
             win_pen = QPen(QColor("#FFFF00"), 5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(win_pen)
@@ -450,19 +600,16 @@ class InfiniteHexScene(QGraphicsScene):
                     x += w / 2
                     
                 points = [
-                    QPointF(x, y - s), QPointF(x + w/2, y - s/2), QPointF(x + w/2, y + s/2),
-                    QPointF(x, y + s), QPointF(x - w/2, y + s/2), QPointF(x - w/2, y - s/2),
+                    QPointF(x, y - draw_s), QPointF(x + draw_w/2, y - draw_s/2), QPointF(x + draw_w/2, y + draw_s/2),
+                    QPointF(x, y + draw_s), QPointF(x - draw_w/2, y + draw_s/2), QPointF(x - draw_w/2, y - draw_s/2),
                 ]
                 
-                if self.win_border_type == "Highlight Each":
-                    painter.drawPolygon(QPolygonF(points))
-                elif self.win_border_type == "Solid Line":
-                    for i, (dq, dr) in enumerate(neighbor_dirs):
-                        neighbor_q = wq + dq
-                        neighbor_r = wr + dr
-                        
-                        if (neighbor_q, neighbor_r) not in self.winning_hexes:
-                            painter.drawLine(points[i], points[(i+1) % 6])
+                if self.win_border_type in ["Highlight Each", "Yellow Pieces + Border"]:
+                    if self.board_style == "Circle":
+                        circle_radius = draw_s * 0.866
+                        painter.drawEllipse(QPointF(x, y), circle_radius, circle_radius)
+                    else:
+                        painter.drawPolygon(QPolygonF(points))
 
 class HexBoardView(QGraphicsView):
     def __init__(self):
@@ -490,6 +637,7 @@ class HexBoardView(QGraphicsView):
         self.pan_timer.start(16) 
         
         self._just_activated = False
+        self._current_cluster_idx = 0
         
         self.setup_ui_overlay()    
         self.setup_confirm_overlay() 
@@ -497,14 +645,152 @@ class HexBoardView(QGraphicsView):
         self.setup_export_overlay()
         self.setup_import_overlay()
         self.setup_quit_confirm_overlay()
+        self.setup_snap_buttons() 
         self.setup_hud()            
         self.setup_escape_menu()   
         
         self.update_center_coords()
         self.update_turn_display()
+        self.update_ui_theme()
 
     def _clear_activation_flag(self):
         self._just_activated = False
+
+    def get_action_clusters(self):
+        if not self.scene.board:
+            return []
+            
+        unvisited = set(self.scene.board.keys())
+        clusters = []
+        
+        def hex_distance(h1, h2):
+            q1, r1 = h1
+            q2, r2 = h2
+            return max(abs(q1 - q2), abs(r1 - r2), abs(-q1-r1 - (-q2-r2)))
+
+        while unvisited:
+            start_hex = unvisited.pop()
+            current_cluster = {start_hex}
+            queue = [start_hex]
+            
+            while queue:
+                curr = queue.pop(0)
+                to_remove = []
+                for other in unvisited:
+                    # If areas are 6 tiles apart they are considered separate.
+                    # Therefore, distance <= 5 groups them in the same area.
+                    if hex_distance(curr, other) <= 5: 
+                        current_cluster.add(other)
+                        queue.append(other)
+                        to_remove.append(other)
+                for item in to_remove:
+                    unvisited.remove(item)
+            clusters.append(current_cluster)
+        
+        # Sort by size to snap to the primary action area first
+        clusters.sort(key=len, reverse=True)
+        return clusters
+
+    def update_ui_theme(self):
+        """Updates the styling of all HUD components and overlays to match the game board colors."""
+        bg_name = self.scene.bg_color_name
+        bo_name = self.scene.border_color_name
+        
+        bg_hex = self.scene.bg_colors.get(bg_name, "#ffffff")
+        bo_hex = self.scene.border_colors.get(bo_name, "#000000")
+        if bo_hex == "None":
+            bo_hex = "transparent"
+            
+        is_dark = bg_name in ["Dark", "Navy"]
+        text_color = "#ffffff" if is_dark else "#000000"
+        btn_bg = "rgba(255, 255, 255, 30)" if is_dark else "rgba(255, 255, 255, 220)"
+        btn_hover = "rgba(255, 255, 255, 50)" if is_dark else "rgba(230, 230, 230, 220)"
+        input_bg = "#2a2a2a" if is_dark else "#ffffff"
+        
+        hover_colors = {
+            "White": "#e6e6e6",
+            "Dark": "#2c2c2c",
+            "Paper": "#e8e4db",
+            "Navy": "#1e293b",
+            "Custom": "#e6e6e6"
+        }
+        window_btn_hover = hover_colors.get(bg_name, "#e6e6e6")
+        
+        hud_style = f"""
+            QFrame {{ background-color: {bg_hex}; border: 2px solid {bo_hex}; border-radius: 8px; }}
+            QLabel {{ color: {text_color}; border: none; background: transparent; font-family: monospace; font-size: 14px; font-weight: bold; }}
+        """
+        self.hud_panel.setStyleSheet(hud_style)
+        
+        if hasattr(self, 'standalone_timer_panel'):
+            self.standalone_timer_panel.setStyleSheet(hud_style)
+            self.standalone_timer_label.setStyleSheet(f"color: {text_color}; border: none; background: transparent; font-family: monospace; font-size: 18px; font-weight: bold;")
+        if hasattr(self, 'hud_timer_label'):
+            self.hud_timer_label.setStyleSheet(f"color: {text_color}; border: none; background: transparent; font-family: monospace; font-size: 16px; font-weight: bold;")
+            
+        overlay_style = f"""
+            QFrame {{ background-color: {bg_hex}; border: 2px solid {bo_hex}; border-radius: 10px; }}
+            QLabel {{ color: {text_color}; border: none; background: transparent; }}
+            QPushButton {{
+                background-color: {btn_bg};
+                border: 2px solid {bo_hex};
+                border-radius: 8px;
+                font-family: monospace;
+                font-size: 14px;
+                font-weight: bold;
+                color: {text_color};
+                padding: 10px 15px;
+            }}
+            QPushButton:hover {{ background-color: {btn_hover}; }}
+            QTextEdit, QLineEdit {{
+                background-color: {input_bg};
+                border: 1px solid {bo_hex};
+                color: {text_color};
+                border-radius: 4px;
+                font-family: monospace;
+                font-size: 14px;
+            }}
+        """
+        
+        self.overlay.setStyleSheet(overlay_style)
+        self.confirm_overlay.setStyleSheet(overlay_style)
+        self.settings_confirm_overlay.setStyleSheet(overlay_style)
+        self.quit_confirm_overlay.setStyleSheet(overlay_style)
+        self.export_overlay.setStyleSheet(overlay_style)
+        self.import_overlay.setStyleSheet(overlay_style)
+        
+        window_btn_style = f"""
+            QPushButton {{
+                background-color: {bg_hex};
+                border: 2px solid {bo_hex};
+                border-radius: 8px;
+                font-family: monospace;
+                font-size: 14px;
+                font-weight: bold;
+                color: {text_color};
+                padding: 10px 15px;
+            }}
+            QPushButton:hover {{ background-color: {window_btn_hover}; }}
+        """
+        
+        if hasattr(self, 'bottom_new_game_btn'):
+            self.bottom_new_game_btn.setStyleSheet(window_btn_style)
+        if hasattr(self, 'snap_action_btn'):
+            self.snap_action_btn.setStyleSheet(window_btn_style)
+        if hasattr(self, 'snap_origin_btn'):
+            self.snap_origin_btn.setStyleSheet(window_btn_style)
+            
+        if hasattr(self, 'reset_settings_btn'):
+            self.reset_settings_btn.setStyleSheet(window_btn_style)
+            self.resume_btn.setStyleSheet(window_btn_style)
+            self.export_btn.setStyleSheet(window_btn_style)
+            self.import_btn.setStyleSheet(window_btn_style)
+            self.quit_btn.setStyleSheet(window_btn_style)
+            
+        if hasattr(self, 'reset_btn'):
+            self.reset_btn.setStyleSheet(window_btn_style)
+        if hasattr(self, 'spectate_btn'):
+            self.spectate_btn.setStyleSheet(window_btn_style)
 
     def setup_escape_menu(self):
         self.esc_menu = QFrame(self)
@@ -527,7 +813,6 @@ class HexBoardView(QGraphicsView):
         content_layout.addWidget(title)
         content_layout.addSpacing(10)
 
-        # Helpers for styling rows and subtitles
         def add_subtitle(text):
             lbl = QLabel(text)
             lbl.setStyleSheet("font-size: 22px; font-weight: bold; color: #aaaaaa; border: none; margin-top: 15px; margin-bottom: 5px;")
@@ -582,41 +867,174 @@ class HexBoardView(QGraphicsView):
         self.cb_coords.toggled.connect(self.toggle_coords)
         add_config_row("Show Coordinates:", self.cb_coords)
 
+        # --- TIME CONTROL SETTINGS ---
+        add_subtitle("Time Control")
+        
+        self.tc_mode_dropdown = QComboBox()
+        self.tc_mode_dropdown.addItems(["Unlimited", "Turn Based", "Move Based", "Match Based"])
+        self.tc_mode_dropdown.setStyleSheet(dropdown_style)
+        add_config_row("Timer Mode:", self.tc_mode_dropdown)
+        
+        def create_tc_input(label, default_val):
+            w = QWidget()
+            l = QHBoxLayout(w)
+            l.setContentsMargins(0,0,0,0)
+            lbl = QLabel(label)
+            lbl.setStyleSheet("color: white; font-size: 16px; font-weight: bold; border: none;")
+            l.addWidget(lbl)
+            l.addStretch()
+            inp = QLineEdit(default_val)
+            inp.setFixedWidth(50)
+            inp.setStyleSheet("background: #2a2a2a; color: white; border: 1px solid white; border-radius: 3px; font-size: 14px; padding: 2px;")
+            l.addWidget(inp)
+            return w, inp
+
+        self.tc_turn_w, self.tc_turn_input = create_tc_input("Turn Time (5-120s):", "30")
+        self.tc_move_w, self.tc_move_input = create_tc_input("Move Time (5-120s):", "15")
+        
+        self.tc_match_w = QWidget()
+        m_lay = QHBoxLayout(self.tc_match_w)
+        m_lay.setContentsMargins(0,0,0,0)
+        lbl_m = QLabel("Match (Min | Inc):")
+        lbl_m.setStyleSheet("color: white; font-size: 16px; font-weight: bold; border: none;")
+        m_lay.addWidget(lbl_m)
+        m_lay.addStretch()
+        self.tc_match_main_input = QLineEdit("10")
+        self.tc_match_main_input.setFixedWidth(40)
+        self.tc_match_main_input.setStyleSheet("background: #2a2a2a; color: white; border: 1px solid white; border-radius: 3px; font-size: 14px; padding: 2px;")
+        self.tc_match_inc_input = QLineEdit("5")
+        self.tc_match_inc_input.setFixedWidth(40)
+        self.tc_match_inc_input.setStyleSheet("background: #2a2a2a; color: white; border: 1px solid white; border-radius: 3px; font-size: 14px; padding: 2px;")
+        m_lay.addWidget(self.tc_match_main_input)
+        m_lay.addWidget(self.tc_match_inc_input)
+
+        content_layout.addWidget(self.tc_turn_w)
+        content_layout.addWidget(self.tc_move_w)
+        content_layout.addWidget(self.tc_match_w)
+        
+        self.timer_pos_dropdown = QComboBox()
+        self.timer_pos_dropdown.addItems(["Top Middle", "Bottom Middle", "Bottom Left", "Top Right", "Bottom Right", "Top Left"])
+        self.timer_pos_dropdown.setStyleSheet(dropdown_style)
+        add_config_row("Timer Position:", self.timer_pos_dropdown)
+        
+        self.tc_mode_dropdown.currentTextChanged.connect(self.on_tc_mode_change)
+        self.timer_pos_dropdown.currentTextChanged.connect(self.on_timer_pos_change)
+        self.on_tc_mode_change("Unlimited")
+
         # --- COLOR SETTINGS ---
         add_subtitle("Color")
 
-        color_options = ["Red", "Blue", "Green", "Yellow", "Purple", "Orange", "Black"]
+        color_options = ["Red", "Blue", "Green", "Yellow", "Purple", "Orange", "Black", "Custom"]
         
+        # P1 Setup
         self.p1_dropdown = QComboBox()
         self.p1_dropdown.addItems(color_options)
         self.p1_dropdown.setCurrentText("Red")
         self.p1_dropdown.setStyleSheet(dropdown_style)
+        
+        p1_container = QWidget()
+        p1_lay = QHBoxLayout(p1_container)
+        p1_lay.setContentsMargins(0,0,0,0)
+        p1_lay.addWidget(self.p1_dropdown)
+        self.p1_hex_input = QLineEdit()
+        self.p1_hex_input.setFixedWidth(80)
+        self.p1_hex_input.setStyleSheet("background: #2a2a2a; color: white; border: 1px solid white; border-radius: 3px; font-size: 14px; padding: 2px;")
+        self.p1_hex_input.setText(self.scene.color_map["Red"]["base"])
+        p1_lay.addWidget(self.p1_hex_input)
+        
         self.p1_dropdown.currentTextChanged.connect(self.change_p1_color)
-        add_config_row("P1 (X) Color:", self.p1_dropdown)
+        self.p1_hex_input.textChanged.connect(self.change_p1_hex_input)
+        add_config_row("P1 (X) Color:", p1_container)
 
+        # P2 Setup
         self.p2_dropdown = QComboBox()
         self.p2_dropdown.addItems(color_options)
         self.p2_dropdown.setCurrentText("Blue")
         self.p2_dropdown.setStyleSheet(dropdown_style)
-        self.p2_dropdown.currentTextChanged.connect(self.change_p2_color)
-        add_config_row("P2 (O) Color:", self.p2_dropdown)
 
+        p2_container = QWidget()
+        p2_lay = QHBoxLayout(p2_container)
+        p2_lay.setContentsMargins(0,0,0,0)
+        p2_lay.addWidget(self.p2_dropdown)
+        self.p2_hex_input = QLineEdit()
+        self.p2_hex_input.setFixedWidth(80)
+        self.p2_hex_input.setStyleSheet("background: #2a2a2a; color: white; border: 1px solid white; border-radius: 3px; font-size: 14px; padding: 2px;")
+        self.p2_hex_input.setText(self.scene.color_map["Blue"]["base"])
+        p2_lay.addWidget(self.p2_hex_input)
+
+        self.p2_dropdown.currentTextChanged.connect(self.change_p2_color)
+        self.p2_hex_input.textChanged.connect(self.change_p2_hex_input)
+        add_config_row("P2 (O) Color:", p2_container)
+
+        # Background Setup
         self.bg_dropdown = QComboBox()
-        self.bg_dropdown.addItems(["White", "Dark", "Paper", "Slate"])
+        self.bg_dropdown.addItems(["White", "Dark", "Paper", "Navy", "Custom"])
         self.bg_dropdown.setCurrentText("White")
         self.bg_dropdown.setStyleSheet(dropdown_style)
-        self.bg_dropdown.currentTextChanged.connect(self.change_bg_color)
-        add_config_row("Background:", self.bg_dropdown)
 
+        bg_container = QWidget()
+        bg_lay = QHBoxLayout(bg_container)
+        bg_lay.setContentsMargins(0,0,0,0)
+        bg_lay.addWidget(self.bg_dropdown)
+        self.bg_hex_input = QLineEdit()
+        self.bg_hex_input.setFixedWidth(80)
+        self.bg_hex_input.setStyleSheet("background: #2a2a2a; color: white; border: 1px solid white; border-radius: 3px; font-size: 14px; padding: 2px;")
+        self.bg_hex_input.setText(self.scene.bg_colors["White"])
+        bg_lay.addWidget(self.bg_hex_input)
+        
+        self.bg_dropdown.currentTextChanged.connect(self.change_bg_color)
+        self.bg_hex_input.textChanged.connect(self.change_bg_hex_input)
+        add_config_row("Background:", bg_container)
+
+        # Borders Setup
         self.border_dropdown = QComboBox()
-        self.border_dropdown.addItems(["Black", "White", "Gray", "None"])
+        self.border_dropdown.addItems(["Black", "White", "Gray", "None", "Custom"])
         self.border_dropdown.setCurrentText("Black")
         self.border_dropdown.setStyleSheet(dropdown_style)
+        
+        bo_container = QWidget()
+        bo_lay = QHBoxLayout(bo_container)
+        bo_lay.setContentsMargins(0,0,0,0)
+        bo_lay.addWidget(self.border_dropdown)
+        self.border_hex_input = QLineEdit()
+        self.border_hex_input.setFixedWidth(80)
+        self.border_hex_input.setStyleSheet("background: #2a2a2a; color: white; border: 1px solid white; border-radius: 3px; font-size: 14px; padding: 2px;")
+        self.border_hex_input.setText(self.scene.border_colors["Black"])
+        bo_lay.addWidget(self.border_hex_input)
+
         self.border_dropdown.currentTextChanged.connect(self.change_border_color)
-        add_config_row("Borders:", self.border_dropdown)
+        self.border_hex_input.textChanged.connect(self.change_border_hex_input)
+        add_config_row("Borders:", bo_container)
+
+        # Last Move Color Setup (Moved to Color Section)
+        self.last_move_color_dropdown = QComboBox()
+        self.last_move_color_dropdown.addItems(["Yellow", "White", "Cyan", "Custom"])
+        self.last_move_color_dropdown.setCurrentText("Yellow")
+        self.last_move_color_dropdown.setStyleSheet(dropdown_style)
+
+        lmc_container = QWidget()
+        lmc_lay = QHBoxLayout(lmc_container)
+        lmc_lay.setContentsMargins(0,0,0,0)
+        lmc_lay.addWidget(self.last_move_color_dropdown)
+        self.last_move_hex_input = QLineEdit()
+        self.last_move_hex_input.setFixedWidth(80)
+        self.last_move_hex_input.setStyleSheet("background: #2a2a2a; color: white; border: 1px solid white; border-radius: 3px; font-size: 14px; padding: 2px;")
+        self.last_move_hex_input.setText(self.scene.last_move_colors["Yellow"])
+        lmc_lay.addWidget(self.last_move_hex_input)
+
+        self.last_move_color_dropdown.currentTextChanged.connect(self.change_last_move_color)
+        self.last_move_hex_input.textChanged.connect(self.change_last_move_hex_input)
+        add_config_row("Last Move Color:", lmc_container)
 
         # --- VISUALS SETTINGS ---
         add_subtitle("Visuals")
+
+        self.board_style_dropdown = QComboBox()
+        self.board_style_dropdown.addItems(["Flush", "Separated", "Circle"])
+        self.board_style_dropdown.setCurrentText("Flush")
+        self.board_style_dropdown.setStyleSheet(dropdown_style)
+        self.board_style_dropdown.currentTextChanged.connect(self.change_board_style)
+        add_config_row("Board Style:", self.board_style_dropdown)
 
         self.mode_dropdown = QComboBox()
         self.mode_dropdown.addItems(["Tic-Tac-Toe", "Color Fill"])
@@ -632,70 +1050,54 @@ class HexBoardView(QGraphicsView):
         add_config_row("Placement Animation:", self.anim_dropdown)
         
         self.last_move_dropdown = QComboBox()
-        self.last_move_dropdown.addItems(["Transparent", "Highlight Each", "Solid Line", "None"])
+        self.last_move_dropdown.addItems(["Transparent", "Border"])
         self.last_move_dropdown.setCurrentText("Transparent")
         self.last_move_dropdown.setStyleSheet(dropdown_style)
         self.last_move_dropdown.currentTextChanged.connect(self.change_last_move_style)
         add_config_row("Last Move Style:", self.last_move_dropdown)
 
         self.win_border_dropdown = QComboBox()
-        self.win_border_dropdown.addItems(["Highlight Each", "Solid Line", "None"])
-        self.win_border_dropdown.setCurrentText("Highlight Each")
+        self.win_border_dropdown.addItems([
+            "Yellow Pieces + Border", 
+            "Yellow Pieces Only", 
+            "Highlight Each", 
+            "None"
+        ])
+        self.win_border_dropdown.setCurrentText("Yellow Pieces + Border")
         self.win_border_dropdown.setStyleSheet(dropdown_style)
         self.win_border_dropdown.currentTextChanged.connect(self.change_win_border)
         add_config_row("Win Border Style:", self.win_border_dropdown)
 
-        # --- BUTTONS ---
-        btn_style = """
-            QPushButton {
-                background-color: rgba(255, 255, 255, 220);
-                border: 2px solid #000000;
-                border-radius: 8px;
-                font-family: monospace;
-                font-size: 14px;
-                font-weight: bold;
-                color: #000000;
-                padding: 10px 15px;
-            }
-            QPushButton:hover { background-color: rgba(230, 230, 230, 220); }
-        """
-
         content_layout.addSpacing(20)
 
         self.reset_settings_btn = QPushButton("Reset Settings")
-        self.reset_settings_btn.setStyleSheet(btn_style)
         self.reset_settings_btn.clicked.connect(self.show_settings_confirm)
         
-        resume_btn = QPushButton("Resume")
-        resume_btn.setStyleSheet(btn_style)
-        resume_btn.clicked.connect(self.toggle_esc_menu)
+        self.resume_btn = QPushButton("Resume")
+        self.resume_btn.clicked.connect(self.toggle_esc_menu)
         
-        export_btn = QPushButton("Export Config")
-        export_btn.setStyleSheet(btn_style)
-        export_btn.clicked.connect(self.export_config)
+        self.export_btn = QPushButton("Export Config")
+        self.export_btn.clicked.connect(self.export_config)
 
-        import_btn = QPushButton("Import Config")
-        import_btn.setStyleSheet(btn_style)
-        import_btn.clicked.connect(self.import_config)
+        self.import_btn = QPushButton("Import Config")
+        self.import_btn.clicked.connect(self.import_config)
 
-        quit_btn = QPushButton("Quit Game")
-        quit_btn.setStyleSheet(btn_style)
-        quit_btn.clicked.connect(self.show_quit_confirm)
+        self.quit_btn = QPushButton("Quit Game")
+        self.quit_btn.clicked.connect(self.show_quit_confirm)
 
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(self.reset_settings_btn)
-        btn_layout.addWidget(resume_btn)
+        btn_layout.addWidget(self.resume_btn)
         content_layout.addLayout(btn_layout)
         
         io_layout = QHBoxLayout()
-        io_layout.addWidget(export_btn)
-        io_layout.addWidget(import_btn)
+        io_layout.addWidget(self.export_btn)
+        io_layout.addWidget(self.import_btn)
         content_layout.addLayout(io_layout)
         
         content_layout.addSpacing(10)
-        content_layout.addWidget(quit_btn, 0, Qt.AlignmentFlag.AlignCenter)
+        content_layout.addWidget(self.quit_btn, 0, Qt.AlignmentFlag.AlignCenter)
         
-        # Wrap menu in a scroll area so it dynamically shrinks/scrolls on small screens
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setWidget(self.menu_content)
@@ -709,34 +1111,199 @@ class HexBoardView(QGraphicsView):
 
         self.esc_layout.addWidget(self.scroll_area, 0, Qt.AlignmentFlag.AlignCenter)
 
+    def on_tc_mode_change(self, text):
+        self.tc_turn_w.setVisible(text == "Turn Based")
+        self.tc_move_w.setVisible(text == "Move Based")
+        self.tc_match_w.setVisible(text == "Match Based")
+        self.update_esc_menu_size()
+
+    def on_timer_pos_change(self, text):
+        self.update_timer_display()
+        self.position_timer()
+        self.update_hud_visibility()
+
+    def apply_time_settings(self):
+        try: turn_v = max(5, min(120, int(self.tc_turn_input.text())))
+        except: turn_v = 30
+        try: move_v = max(5, min(120, int(self.tc_move_input.text())))
+        except: move_v = 15
+        try: match_m = max(1, min(60, int(self.tc_match_main_input.text())))
+        except: match_m = 10
+        try: match_i = max(0, min(60, int(self.tc_match_inc_input.text())))
+        except: match_i = 5
+        
+        mode = self.tc_mode_dropdown.currentText()
+        self.scene.tc_mode_config = mode
+        self.scene.tc_turn_sec = turn_v
+        self.scene.tc_move_sec = move_v
+        self.scene.tc_match_m_config = match_m
+        self.scene.tc_match_i_config = match_i
+        
+        if mode in ["Turn Based", "Move Based"]:
+            if self.scene.active_tc_mode != mode:
+                self.scene.active_tc_mode = mode
+                self.scene.active_time_left = turn_v if mode == "Turn Based" else move_v
+            if not self.scene.game_over and self.scene.board:
+                self.scene.game_clock.start(1000)
+        elif mode == "Unlimited":
+            self.scene.active_tc_mode = "Unlimited"
+            self.scene.game_clock.stop()
+        
+        self.update_timer_display()
+
     def update_esc_menu_size(self):
         if hasattr(self, 'scroll_area') and hasattr(self, 'menu_content'):
             content_h = self.menu_content.sizeHint().height()
             available_h = self.height() - 80 
             target_h = min(content_h, max(available_h, 200))
-            self.scroll_area.setFixedSize(465, target_h) # slightly wider to fit scrollbar comfortably
+            self.scroll_area.setFixedSize(465, target_h) 
 
     def change_p1_color(self, text):
-        self.scene.p1_color_name = text
+        scene_name = "Custom P1" if text == "Custom" else text
+        self.scene.p1_color_name = scene_name
+        
+        if hasattr(self, 'p1_hex_input'):
+            self.p1_hex_input.blockSignals(True)
+            self.p1_hex_input.setText(self.scene.color_map[scene_name]["base"])
+            self.p1_hex_input.blockSignals(False)
+            
         self.scene.update_threats() 
         self.scene.invalidate()
         self.viewport().update()
         self.update_turn_display()
+        self.update_timer_display()
+
+    def change_p1_hex_input(self, text):
+        matched_preset = None
+        for name, data in self.scene.color_map.items():
+            if not name.startswith("Custom") and data["base"].lower() == text.lower():
+                matched_preset = name
+                break
+
+        self.p1_dropdown.blockSignals(True)
+        if matched_preset:
+            self.p1_dropdown.setCurrentText(matched_preset)
+            self.scene.p1_color_name = matched_preset
+        else:
+            self.p1_dropdown.setCurrentText("Custom")
+            self.scene.p1_color_name = "Custom P1"
+            self.scene.color_map["Custom P1"]["base"] = text
+        self.p1_dropdown.blockSignals(False)
+
+        self.scene.update_threats() 
+        self.scene.invalidate()
+        self.viewport().update()
+        self.update_turn_display()
+        self.update_timer_display()
 
     def change_p2_color(self, text):
-        self.scene.p2_color_name = text
+        scene_name = "Custom P2" if text == "Custom" else text
+        self.scene.p2_color_name = scene_name
+        
+        if hasattr(self, 'p2_hex_input'):
+            self.p2_hex_input.blockSignals(True)
+            self.p2_hex_input.setText(self.scene.color_map[scene_name]["base"])
+            self.p2_hex_input.blockSignals(False)
+            
         self.scene.update_threats() 
         self.scene.invalidate()
         self.viewport().update()
         self.update_turn_display()
+        self.update_timer_display()
+
+    def change_p2_hex_input(self, text):
+        matched_preset = None
+        for name, data in self.scene.color_map.items():
+            if not name.startswith("Custom") and data["base"].lower() == text.lower():
+                matched_preset = name
+                break
+
+        self.p2_dropdown.blockSignals(True)
+        if matched_preset:
+            self.p2_dropdown.setCurrentText(matched_preset)
+            self.scene.p2_color_name = matched_preset
+        else:
+            self.p2_dropdown.setCurrentText("Custom")
+            self.scene.p2_color_name = "Custom P2"
+            self.scene.color_map["Custom P2"]["base"] = text
+        self.p2_dropdown.blockSignals(False)
+
+        self.scene.update_threats() 
+        self.scene.invalidate()
+        self.viewport().update()
+        self.update_turn_display()
+        self.update_timer_display()
 
     def change_bg_color(self, text):
         self.scene.bg_color_name = text
+        if hasattr(self, 'bg_hex_input'):
+            self.bg_hex_input.blockSignals(True)
+            self.bg_hex_input.setText(self.scene.bg_colors.get(text, "#ffffff"))
+            self.bg_hex_input.blockSignals(False)
+            
         self.scene.invalidate()
         self.viewport().update()
+        self.update_ui_theme()
+
+    def change_bg_hex_input(self, text):
+        matched_preset = None
+        for name, hex_code in self.scene.bg_colors.items():
+            if name != "Custom" and hex_code.lower() == text.lower():
+                matched_preset = name
+                break
+
+        self.bg_dropdown.blockSignals(True)
+        if matched_preset:
+            self.bg_dropdown.setCurrentText(matched_preset)
+            self.scene.bg_color_name = matched_preset
+        else:
+            self.bg_dropdown.setCurrentText("Custom")
+            self.scene.bg_color_name = "Custom"
+            self.scene.bg_colors["Custom"] = text
+        self.bg_dropdown.blockSignals(False)
+
+        self.scene.invalidate()
+        self.viewport().update()
+        self.update_ui_theme()
 
     def change_border_color(self, text):
         self.scene.border_color_name = text
+        if hasattr(self, 'border_hex_input'):
+            self.border_hex_input.blockSignals(True)
+            val = self.scene.border_colors.get(text, "#000000")
+            self.border_hex_input.setText(val)
+            self.border_hex_input.blockSignals(False)
+            
+        self.scene.invalidate()
+        self.viewport().update()
+        self.update_ui_theme()
+
+    def change_border_hex_input(self, text):
+        matched_preset = None
+        for name, hex_code in self.scene.border_colors.items():
+            if name != "Custom" and hex_code.lower() == text.lower() and name != "None":
+                matched_preset = name
+                break
+                
+        if text.lower() == "none":
+            matched_preset = "None"
+
+        self.border_dropdown.blockSignals(True)
+        if matched_preset:
+            self.border_dropdown.setCurrentText(matched_preset)
+            self.scene.border_color_name = matched_preset
+        else:
+            self.border_dropdown.setCurrentText("Custom")
+            self.scene.border_color_name = "Custom"
+            self.scene.border_colors["Custom"] = text
+        self.border_dropdown.blockSignals(False)
+
+        self.scene.invalidate()
+        self.viewport().update()
+        self.update_ui_theme()
+
+    def change_board_style(self, text):
+        self.scene.board_style = text
         self.scene.invalidate()
         self.viewport().update()
 
@@ -746,7 +1313,7 @@ class HexBoardView(QGraphicsView):
             item = self.last_move_dropdown.model().item(0)
             if item: item.setEnabled(False)
             if self.last_move_dropdown.currentText() == "Transparent":
-                self.last_move_dropdown.setCurrentText("Highlight Each")
+                self.last_move_dropdown.setCurrentText("Border")
         else:
             item = self.last_move_dropdown.model().item(0)
             if item: item.setEnabled(True)
@@ -760,6 +1327,36 @@ class HexBoardView(QGraphicsView):
 
     def change_last_move_style(self, text):
         self.scene.last_move_style = text
+        self.scene.invalidate()
+        self.viewport().update()
+
+    def change_last_move_color(self, text):
+        self.scene.last_move_color_name = text
+        if hasattr(self, 'last_move_hex_input'):
+            self.last_move_hex_input.blockSignals(True)
+            self.last_move_hex_input.setText(self.scene.last_move_colors.get(text, "#ffffff"))
+            self.last_move_hex_input.blockSignals(False)
+            
+        self.scene.invalidate()
+        self.viewport().update()
+
+    def change_last_move_hex_input(self, text):
+        matched_preset = None
+        for name, hex_code in self.scene.last_move_colors.items():
+            if name != "Custom" and hex_code.lower() == text.lower():
+                matched_preset = name
+                break
+
+        self.last_move_color_dropdown.blockSignals(True)
+        if matched_preset:
+            self.last_move_color_dropdown.setCurrentText(matched_preset)
+            self.scene.last_move_color_name = matched_preset
+        else:
+            self.last_move_color_dropdown.setCurrentText("Custom")
+            self.scene.last_move_color_name = "Custom"
+            self.scene.last_move_colors["Custom"] = text
+        self.last_move_color_dropdown.blockSignals(False)
+
         self.scene.invalidate()
         self.viewport().update()
         
@@ -778,7 +1375,10 @@ class HexBoardView(QGraphicsView):
         self.update_hud_visibility()
 
     def update_hud_visibility(self):
-        if not self.cb_coords.isChecked() and not self.cb_next_turn.isChecked():
+        if not hasattr(self, 'hud_panel'): return
+        
+        show_timer = (self.scene.active_tc_mode != "Unlimited" and self.timer_pos_dropdown.currentText() == "Top Left")
+        if not self.cb_coords.isChecked() and not self.cb_next_turn.isChecked() and not show_timer:
             self.hud_panel.hide()
         else:
             self.hud_panel.show()
@@ -790,12 +1390,16 @@ class HexBoardView(QGraphicsView):
 
     def toggle_esc_menu(self):
         if self.esc_menu.isVisible():
+            self.apply_time_settings()
             self.esc_menu.hide()
+            self.scene.is_paused = False
         else:
+            self.keys_pressed.clear()
             self.esc_menu.resize(self.size())
             self.update_esc_menu_size()
             self.esc_menu.show()
             self.esc_menu.raise_()
+            self.scene.is_paused = True
 
     def show_settings_confirm(self):
         self.settings_confirm_overlay.show()
@@ -810,11 +1414,21 @@ class HexBoardView(QGraphicsView):
         self.p2_dropdown.setCurrentText("Blue")
         self.bg_dropdown.setCurrentText("White")
         self.border_dropdown.setCurrentText("Black")
+        self.board_style_dropdown.setCurrentText("Flush")
         self.mode_dropdown.setCurrentText("Tic-Tac-Toe")
         self.anim_dropdown.setCurrentText("None")
         self.last_move_dropdown.setCurrentText("Transparent")
-        self.win_border_dropdown.setCurrentText("Highlight Each")
+        self.last_move_color_dropdown.setCurrentText("Yellow")
+        self.win_border_dropdown.setCurrentText("Yellow Pieces + Border")
+        
+        self.tc_mode_dropdown.setCurrentText("Unlimited")
+        self.tc_turn_input.setText("30")
+        self.tc_move_input.setText("15")
+        self.tc_match_main_input.setText("10")
+        self.tc_match_inc_input.setText("5")
+        self.timer_pos_dropdown.setCurrentText("Top Middle")
 
+        self.update_ui_theme()
         self.settings_confirm_overlay.hide()
         self.viewport().update()
 
@@ -824,13 +1438,26 @@ class HexBoardView(QGraphicsView):
             "n": self.cb_next_turn.isChecked(),
             "ch": self.cb_checks.isChecked(),
             "p1": self.p1_dropdown.currentText(),
+            "p1_hex": self.scene.color_map["Custom P1"]["base"],
             "p2": self.p2_dropdown.currentText(),
+            "p2_hex": self.scene.color_map["Custom P2"]["base"],
             "bg": self.bg_dropdown.currentText(),
+            "bg_hex": self.scene.bg_colors.get("Custom", "#ffffff"),
             "bo": self.border_dropdown.currentText(),
+            "bo_hex": self.scene.border_colors.get("Custom", "#000000"),
+            "bs": self.board_style_dropdown.currentText(),
             "m": self.mode_dropdown.currentText(),
             "a": self.anim_dropdown.currentText(),
             "lms": self.last_move_dropdown.currentText(),
-            "wb": self.win_border_dropdown.currentText()
+            "lmc": self.last_move_color_dropdown.currentText(),
+            "lmc_hex": self.scene.last_move_colors.get("Custom", "#ffee58"),
+            "wb": self.win_border_dropdown.currentText(),
+            "tc_m": self.tc_mode_dropdown.currentText(),
+            "tc_t": self.tc_turn_input.text(),
+            "tc_v": self.tc_move_input.text(),
+            "tc_mm": self.tc_match_main_input.text(),
+            "tc_mi": self.tc_match_inc_input.text(),
+            "tp": self.timer_pos_dropdown.currentText()
         }
         json_str = json.dumps(config)
         code = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
@@ -862,21 +1489,48 @@ class HexBoardView(QGraphicsView):
             self.cb_next_turn.setChecked(config.get("n", True))
             self.cb_checks.setChecked(config.get("ch", True))
             
+            if "p1_hex" in config: self.scene.color_map["Custom P1"]["base"] = config["p1_hex"]
             if "p1" in config: self.p1_dropdown.setCurrentText(config["p1"])
+            
+            if "p2_hex" in config: self.scene.color_map["Custom P2"]["base"] = config["p2_hex"]
             if "p2" in config: self.p2_dropdown.setCurrentText(config["p2"])
+            
+            if "bg_hex" in config: self.scene.bg_colors["Custom"] = config["bg_hex"]
             if "bg" in config: self.bg_dropdown.setCurrentText(config["bg"])
+            
+            if "bo_hex" in config: self.scene.border_colors["Custom"] = config["bo_hex"]
             if "bo" in config: self.border_dropdown.setCurrentText(config["bo"])
+            
+            if "bs" in config: self.board_style_dropdown.setCurrentText(config["bs"])
             if "m" in config: self.mode_dropdown.setCurrentText(config["m"])
             if "a" in config: self.anim_dropdown.setCurrentText(config["a"])
             
             if "lms" in config:
                 lms_val = config["lms"]
+                if lms_val not in ["Transparent", "Border"]:
+                    lms_val = "Border"
                 if self.mode_dropdown.currentText() == "Color Fill" and lms_val == "Transparent":
-                    lms_val = "Highlight Each"
+                    lms_val = "Border"
                 self.last_move_dropdown.setCurrentText(lms_val)
                 
-            if "wb" in config: self.win_border_dropdown.setCurrentText(config["wb"])
+            if "lmc_hex" in config: self.scene.last_move_colors["Custom"] = config["lmc_hex"]
+            if "lmc" in config: self.last_move_color_dropdown.setCurrentText(config["lmc"])
             
+            if "wb" in config: 
+                wb_val = config["wb"]
+                valid_wb = ["Yellow Pieces + Border", "Yellow Pieces Only", "Highlight Each", "None"]
+                if wb_val not in valid_wb:
+                    wb_val = "Yellow Pieces + Border"
+                self.win_border_dropdown.setCurrentText(wb_val)
+                
+            if "tc_m" in config: self.tc_mode_dropdown.setCurrentText(config["tc_m"])
+            if "tc_t" in config: self.tc_turn_input.setText(config["tc_t"])
+            if "tc_v" in config: self.tc_move_input.setText(config["tc_v"])
+            if "tc_mm" in config: self.tc_match_main_input.setText(config["tc_mm"])
+            if "tc_mi" in config: self.tc_match_inc_input.setText(config["tc_mi"])
+            if "tp" in config: self.timer_pos_dropdown.setCurrentText(config["tp"])
+            
+            self.update_ui_theme()
             self.import_overlay.hide()
         except Exception:
             self.import_error_label.setText("Invalid config code.")
@@ -889,38 +1543,74 @@ class HexBoardView(QGraphicsView):
             self.confirm_overlay.raise_()
         elif event.matches(QKeySequence.StandardKey.Undo):
             self.scene.undo_move()
-        elif event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down, 
-                             Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D):
-            # Intercept arrow keys to stop native QGraphicsView scrolling
-            self.keys_pressed.add(event.key())
-            event.accept()
         else:
-            self.keys_pressed.add(event.key())
-            super().keyPressEvent(event)
+            pan_zoom_keys = (
+                Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down, 
+                Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D,
+                Qt.Key.Key_Equal, Qt.Key.Key_Plus, Qt.Key.Key_Minus
+            )
+            
+            if event.key() in pan_zoom_keys:
+                if hasattr(self, 'esc_menu') and self.esc_menu.isVisible():
+                    super().keyPressEvent(event)
+                    return
+                self.keys_pressed.add(event.key())
+                event.accept()
+            else:
+                super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
         if event.key() in self.keys_pressed:
             self.keys_pressed.remove(event.key())
             
-        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down, 
-                           Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D):
+        pan_zoom_keys = (
+            Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down, 
+            Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D,
+            Qt.Key.Key_Equal, Qt.Key.Key_Plus, Qt.Key.Key_Minus
+        )
+            
+        if event.key() in pan_zoom_keys:
             event.accept()
         else:
             super().keyReleaseEvent(event)
 
     def smooth_pan(self):
-        if not self.keys_pressed: return
+        if not self.keys_pressed or (hasattr(self, 'esc_menu') and self.esc_menu.isVisible()): 
+            return
 
         dx = dy = 0
-        if Qt.Key.Key_Left in self.keys_pressed or Qt.Key.Key_A in self.keys_pressed:  dx = -self.pan_speed
-        if Qt.Key.Key_Right in self.keys_pressed or Qt.Key.Key_D in self.keys_pressed: dx = self.pan_speed
-        if Qt.Key.Key_Up in self.keys_pressed or Qt.Key.Key_W in self.keys_pressed:    dy = -self.pan_speed
-        if Qt.Key.Key_Down in self.keys_pressed or Qt.Key.Key_S in self.keys_pressed:  dy = self.pan_speed
+        
+        if Qt.Key.Key_Left in self.keys_pressed: dx -= self.pan_speed
+        if Qt.Key.Key_A in self.keys_pressed:    dx -= self.pan_speed
+        if Qt.Key.Key_Right in self.keys_pressed: dx += self.pan_speed
+        if Qt.Key.Key_D in self.keys_pressed:    dx += self.pan_speed
+        
+        if Qt.Key.Key_Up in self.keys_pressed:   dy -= self.pan_speed
+        if Qt.Key.Key_W in self.keys_pressed:    dy -= self.pan_speed
+        if Qt.Key.Key_Down in self.keys_pressed: dy += self.pan_speed
+        if Qt.Key.Key_S in self.keys_pressed:    dy += self.pan_speed
 
         if dx != 0 or dy != 0:
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() + dx)
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() + dy)
             self.update_center_coords()
+
+        zoom_in = Qt.Key.Key_Equal in self.keys_pressed or Qt.Key.Key_Plus in self.keys_pressed
+        zoom_out = Qt.Key.Key_Minus in self.keys_pressed
+        
+        if zoom_in and not zoom_out:
+            zoom_factor = 1.015
+        elif zoom_out and not zoom_in:
+            zoom_factor = 1.0 / 1.015
+        else:
+            zoom_factor = 1.0
+            
+        if zoom_factor != 1.0:
+            new_zoom = self.current_zoom * zoom_factor
+            if 0.2 < new_zoom < 5.0:
+                self.scale(zoom_factor, zoom_factor)
+                self.current_zoom = new_zoom
+                self.update_center_coords()
 
     def mousePressEvent(self, event):
         if self._just_activated:
@@ -964,40 +1654,178 @@ class HexBoardView(QGraphicsView):
             
             super().mouseMoveEvent(event)
 
+    def setup_snap_buttons(self):
+        self.snap_container = QWidget(self)
+        layout = QVBoxLayout(self.snap_container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        
+        self.snap_action_btn = QPushButton("Snap to Action")
+        self.snap_action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.snap_action_btn.clicked.connect(self.snap_to_action)
+        
+        self.snap_origin_btn = QPushButton("Snap to Origin")
+        self.snap_origin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.snap_origin_btn.clicked.connect(self.snap_to_origin)
+        
+        layout.addWidget(self.snap_action_btn)
+        layout.addWidget(self.snap_origin_btn)
+        
+        self.snap_container.hide()
+
+    def check_snap_visibility(self):
+        if not hasattr(self, 'snap_container'): return
+        
+        if not self.scene.board:
+            if self.snap_container.isVisible():
+                self.snap_container.hide()
+                self.snap_action_btn.setText("Snap to Action")
+                self._current_cluster_idx = 0
+                if hasattr(self, 'position_timer'):
+                    self.position_timer()
+            return
+
+        visible_rect = self.mapToScene(self.viewport().rect()).boundingRect()
+        s = self.scene.hex_size
+        w = math.sqrt(3) * s
+        h = 2 * s
+
+        clusters = self.get_action_clusters()
+        visible_clusters = 0
+        
+        for cluster in clusters:
+            cluster_visible = False
+            for (q, r) in cluster:
+                raw_q = q + self.scene.origin_offset[0]
+                raw_r = r + self.scene.origin_offset[1]
+                row = raw_r
+                col = raw_q + (row // 2)
+                
+                x = col * w
+                y = row * h * 0.75
+                if row % 2 != 0:
+                    x += w / 2
+                    
+                piece_rect = QRectF(x - w/2, y - s, w, 2*s)
+                if visible_rect.intersects(piece_rect):
+                    cluster_visible = True
+                    break
+            if cluster_visible:
+                visible_clusters += 1
+        
+        # Show the snap container if NO clusters are visible, OR if there are multiple clusters and not all of them are visible
+        should_show = (visible_clusters == 0) or (len(clusters) > 1 and visible_clusters < len(clusters))
+        
+        if not should_show:
+            if self.snap_container.isVisible():
+                self.snap_container.hide()
+                self.snap_action_btn.setText("Snap to Action")
+                self._current_cluster_idx = 0
+                if hasattr(self, 'position_timer'):
+                    self.position_timer()
+        else:
+            if len(clusters) > 1 and visible_clusters > 0:
+                self.snap_action_btn.setText(f"Next Area ({self._current_cluster_idx % len(clusters) + 1}/{len(clusters)})")
+            elif len(clusters) <= 1:
+                self.snap_action_btn.setText("Snap to Action")
+
+            if not self.snap_container.isVisible():
+                self.snap_container.show()
+                self.snap_container.raise_()
+                self.snap_container.adjustSize()
+                self.snap_container.move(self.width() - self.snap_container.width() - 20, self.height() - self.snap_container.height() - 20)
+                if hasattr(self, 'position_timer'):
+                    self.position_timer()
+
+    def snap_to_action(self):
+        if not self.scene.board:
+            self.snap_to_origin()
+            return
+
+        clusters = self.get_action_clusters()
+        
+        if len(clusters) > 1:
+            target_cluster = clusters[self._current_cluster_idx % len(clusters)]
+            self._current_cluster_idx += 1
+        else:
+            target_cluster = self.scene.board.keys()
+            self._current_cluster_idx = 0
+
+        s = self.scene.hex_size
+        w = math.sqrt(3) * s
+        h = 2 * s
+
+        min_x = min_y = float('inf')
+        max_x = max_y = float('-inf')
+
+        for (q, r) in target_cluster:
+            raw_q = q + self.scene.origin_offset[0]
+            raw_r = r + self.scene.origin_offset[1]
+            row = raw_r
+            col = raw_q + (row // 2)
+            
+            x = col * w
+            y = row * h * 0.75
+            if row % 2 != 0:
+                x += w / 2
+            
+            min_x = min(min_x, x - w)
+            max_x = max(max_x, x + w)
+            min_y = min(min_y, y - h)
+            max_y = max(max_y, y + h)
+
+        board_rect = QRectF(min_x, min_y, max_x - min_x, max_y - min_y)
+        padding = w * 1.5
+        board_rect.adjust(-padding, -padding, padding, padding)
+        center = board_rect.center()
+
+        view_w = self.viewport().width()
+        view_h = self.viewport().height()
+        
+        if board_rect.width() > 0 and board_rect.height() > 0:
+            zoom_x = view_w / board_rect.width()
+            zoom_y = view_h / board_rect.height()
+            target_zoom = min(zoom_x, zoom_y)
+            target_zoom = max(0.2, min(target_zoom, 1.2)) 
+        else:
+            target_zoom = 1.0
+
+        if target_zoom != self.current_zoom:
+            self.scale(target_zoom / self.current_zoom, target_zoom / self.current_zoom)
+            self.current_zoom = target_zoom
+            
+        self.centerOn(center)
+        self.update_center_coords()
+        self.check_snap_visibility()
+
+    def snap_to_origin(self):
+        if self.current_zoom != 1.0:
+            self.scale(1.0 / self.current_zoom, 1.0 / self.current_zoom)
+            self.current_zoom = 1.0
+        self.centerOn(0, 0)
+        self.update_center_coords()
+        self.check_snap_visibility()
+
     def setup_hud(self):
         self.hud_panel = QFrame(self)
-        self.hud_panel.setStyleSheet("""
-            QFrame {
-                background-color: rgba(255, 255, 255, 220);
-                border: 2px solid #000000;
-                border-radius: 8px;
-            }
-        """)
-        
         layout = QVBoxLayout(self.hud_panel)
-        # Using SetFixedSize forces the QFrame to continuously auto-resize based on the layout contents!
         layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
         
-        label_style = "border: none; background: transparent; font-family: monospace; font-size: 14px; font-weight: bold; color: #000000;"
+        self.hud_timer_label = QLabel("00:00")
+        layout.insertWidget(0, self.hud_timer_label)
+        self.hud_timer_label.hide()
         
         self.center_coord_label = QLabel("Center: (0, 0)")
-        self.center_coord_label.setStyleSheet(label_style)
-        
         self.mouse_coord_label = QLabel("Mouse:  (-, -)")
-        self.mouse_coord_label.setStyleSheet(label_style)
         
         self.turn_container = QWidget()
-        self.turn_container.setStyleSheet("background: transparent; border: none;")
         turn_layout = QHBoxLayout(self.turn_container)
         turn_layout.setContentsMargins(0, 5, 0, 0) 
         
         self.turn_icon_label = QLabel()
-        self.turn_icon_label.setStyleSheet("border: none; background: transparent;")
-        
         self.turn_text_label = QLabel("0 placements left")
-        self.turn_text_label.setStyleSheet(label_style)
         
         turn_layout.addWidget(self.turn_icon_label)
         turn_layout.addWidget(self.turn_text_label)
@@ -1009,6 +1837,82 @@ class HexBoardView(QGraphicsView):
         
         self.hud_panel.move(20, 20)
         self.hud_panel.show()
+        
+        self.standalone_timer_panel = QFrame(self)
+        t_lay = QVBoxLayout(self.standalone_timer_panel)
+        t_lay.setContentsMargins(15, 10, 15, 10)
+        self.standalone_timer_label = QLabel("00:00")
+        t_lay.addWidget(self.standalone_timer_label)
+        self.standalone_timer_panel.hide()
+        
+        self.scene.on_time_tick = self.update_timer_display
+
+    def format_time(self, seconds):
+        m = seconds // 60
+        s = seconds % 60
+        return f"{m:02d}:{s:02d}"
+
+    def update_timer_display(self):
+        if not hasattr(self, 'standalone_timer_panel'): return
+        
+        mode = self.scene.active_tc_mode
+        if mode == "Unlimited":
+            self.standalone_timer_panel.hide()
+            self.hud_timer_label.hide()
+            self.update_hud_visibility()
+            return
+            
+        text = ""
+        if mode == "Match Based":
+            p1_color = self.scene.p1_color_name
+            p2_color = self.scene.p2_color_name
+            text = f"{p1_color}: {self.format_time(self.scene.p1_time)}  |  {p2_color}: {self.format_time(self.scene.p2_time)}"
+        else:
+            text = f"Time: {self.format_time(self.scene.active_time_left)}"
+            
+        pos = self.timer_pos_dropdown.currentText()
+        if pos == "Top Left":
+            self.standalone_timer_panel.hide()
+            self.hud_timer_label.setText(text)
+            self.hud_timer_label.show()
+            self.update_hud_visibility()
+        else:
+            self.hud_timer_label.hide()
+            self.standalone_timer_label.setText(text)
+            self.standalone_timer_panel.show()
+            self.standalone_timer_panel.adjustSize()
+            self.position_timer()
+            self.update_hud_visibility()
+
+    def position_timer(self):
+        if not hasattr(self, 'standalone_timer_panel') or not self.standalone_timer_panel.isVisible(): 
+            return
+        
+        pos = self.timer_pos_dropdown.currentText()
+        w = self.standalone_timer_panel.width()
+        h = self.standalone_timer_panel.height()
+        
+        if pos == "Top Middle":
+            x = (self.width() - w) // 2
+            y = 20
+        elif pos == "Bottom Middle":
+            x = (self.width() - w) // 2
+            y = self.height() - h - 20
+        elif pos == "Bottom Left":
+            x = 20
+            y = self.height() - h - 20
+        elif pos == "Top Right":
+            x = self.width() - w - 20
+            y = 20
+        elif pos == "Bottom Right":
+            x = self.width() - w - 20
+            y = self.height() - h - 20
+            if hasattr(self, 'snap_container') and self.snap_container.isVisible():
+                y -= (self.snap_container.height() + 10)
+        else:
+            return 
+            
+        self.standalone_timer_panel.move(x, y)
 
     def update_turn_display(self):
         if not hasattr(self, 'hud_panel'): return
@@ -1074,6 +1978,7 @@ class HexBoardView(QGraphicsView):
         r = raw_r - self.scene.origin_offset[1]
         
         self.center_coord_label.setText(f"Center: ({q + r}, {-r})")
+        self.check_snap_visibility()
 
     def scrollContentsBy(self, dx, dy):
         super().scrollContentsBy(dx, dy)
@@ -1081,43 +1986,19 @@ class HexBoardView(QGraphicsView):
 
     def setup_ui_overlay(self):
         self.overlay = QFrame(self)
-        self.overlay.setStyleSheet("""
-            QFrame {
-                background-color: rgba(255, 255, 255, 230); 
-                border: 2px solid black; 
-                border-radius: 10px;
-            }
-        """)
-        
         layout = QVBoxLayout(self.overlay)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
         
         self.win_label = QLabel("Winner!")
-        self.win_label.setStyleSheet("font-size: 24px; font-weight: bold; color: black; border: none; background: transparent;")
+        self.win_label.setStyleSheet("font-size: 24px; font-weight: bold; border: none; background: transparent;")
         self.win_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         btn_container = QHBoxLayout()
-        btn_style = """
-            QPushButton {
-                background-color: rgba(255, 255, 255, 220);
-                border: 2px solid #000000;
-                border-radius: 8px;
-                font-family: monospace;
-                font-size: 14px;
-                font-weight: bold;
-                color: #000000;
-                padding: 10px;
-            }
-            QPushButton:hover { background-color: rgba(230, 230, 230, 220); }
-        """
-
         self.reset_btn = QPushButton("New Game")
-        self.reset_btn.setStyleSheet(btn_style)
         self.reset_btn.clicked.connect(self.reset_game)
 
         self.spectate_btn = QPushButton("Spectate")
-        self.spectate_btn.setStyleSheet(btn_style)
         self.spectate_btn.clicked.connect(self.spectate_game)
         
         btn_container.addWidget(self.reset_btn)
@@ -1130,49 +2011,24 @@ class HexBoardView(QGraphicsView):
         self.overlay.hide()
 
         self.bottom_new_game_btn = QPushButton("New Game", self)
-        self.bottom_new_game_btn.setStyleSheet(btn_style)
         self.bottom_new_game_btn.clicked.connect(self.reset_game)
         self.bottom_new_game_btn.hide()
 
     def setup_confirm_overlay(self):
         self.confirm_overlay = QFrame(self)
-        self.confirm_overlay.setStyleSheet("""
-            QFrame {
-                background-color: rgba(255, 255, 255, 230); 
-                border: 2px solid black; 
-                border-radius: 10px;
-            }
-        """)
-        
         layout = QVBoxLayout(self.confirm_overlay)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
         
         title = QLabel("Reset Board?")
-        title.setStyleSheet("font-size: 20px; font-weight: bold; color: black; border: none; background: transparent;")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; border: none; background: transparent;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         btn_container = QHBoxLayout()
-        btn_style = """
-            QPushButton {
-                background-color: rgba(255, 255, 255, 220);
-                border: 2px solid #000000;
-                border-radius: 8px;
-                font-family: monospace;
-                font-size: 14px;
-                font-weight: bold;
-                color: #000000;
-                padding: 10px;
-            }
-            QPushButton:hover { background-color: rgba(230, 230, 230, 220); }
-        """
-
         yes_btn = QPushButton("Yes")
-        yes_btn.setStyleSheet(btn_style)
         yes_btn.clicked.connect(self.reset_game)
 
         no_btn = QPushButton("No")
-        no_btn.setStyleSheet(btn_style)
         no_btn.clicked.connect(self.confirm_overlay.hide)
         
         btn_container.addWidget(yes_btn)
@@ -1186,43 +2042,19 @@ class HexBoardView(QGraphicsView):
 
     def setup_settings_confirm_overlay(self):
         self.settings_confirm_overlay = QFrame(self)
-        self.settings_confirm_overlay.setStyleSheet("""
-            QFrame {
-                background-color: rgba(255, 255, 255, 230); 
-                border: 2px solid black; 
-                border-radius: 10px;
-            }
-        """)
-        
         layout = QVBoxLayout(self.settings_confirm_overlay)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
         
         title = QLabel("Reset Settings?")
-        title.setStyleSheet("font-size: 20px; font-weight: bold; color: black; border: none; background: transparent;")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; border: none; background: transparent;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         btn_container = QHBoxLayout()
-        btn_style = """
-            QPushButton {
-                background-color: rgba(255, 255, 255, 220);
-                border: 2px solid #000000;
-                border-radius: 8px;
-                font-family: monospace;
-                font-size: 14px;
-                font-weight: bold;
-                color: #000000;
-                padding: 10px;
-            }
-            QPushButton:hover { background-color: rgba(230, 230, 230, 220); }
-        """
-
         yes_btn = QPushButton("Yes")
-        yes_btn.setStyleSheet(btn_style)
         yes_btn.clicked.connect(self.confirm_reset_settings)
 
         no_btn = QPushButton("No")
-        no_btn.setStyleSheet(btn_style)
         no_btn.clicked.connect(self.settings_confirm_overlay.hide)
         
         btn_container.addWidget(yes_btn)
@@ -1236,43 +2068,19 @@ class HexBoardView(QGraphicsView):
 
     def setup_quit_confirm_overlay(self):
         self.quit_confirm_overlay = QFrame(self)
-        self.quit_confirm_overlay.setStyleSheet("""
-            QFrame {
-                background-color: rgba(255, 255, 255, 230); 
-                border: 2px solid black; 
-                border-radius: 10px;
-            }
-        """)
-        
         layout = QVBoxLayout(self.quit_confirm_overlay)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
         
         title = QLabel("Quit Game?")
-        title.setStyleSheet("font-size: 20px; font-weight: bold; color: black; border: none; background: transparent;")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; border: none; background: transparent;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         btn_container = QHBoxLayout()
-        btn_style = """
-            QPushButton {
-                background-color: rgba(255, 255, 255, 220);
-                border: 2px solid #000000;
-                border-radius: 8px;
-                font-family: monospace;
-                font-size: 14px;
-                font-weight: bold;
-                color: #000000;
-                padding: 10px;
-            }
-            QPushButton:hover { background-color: rgba(230, 230, 230, 220); }
-        """
-
         yes_btn = QPushButton("Yes")
-        yes_btn.setStyleSheet(btn_style)
         yes_btn.clicked.connect(QApplication.instance().quit)
 
         no_btn = QPushButton("No")
-        no_btn.setStyleSheet(btn_style)
         no_btn.clicked.connect(self.quit_confirm_overlay.hide)
         
         btn_container.addWidget(yes_btn)
@@ -1290,48 +2098,23 @@ class HexBoardView(QGraphicsView):
 
     def setup_export_overlay(self):
         self.export_overlay = QFrame(self)
-        self.export_overlay.setStyleSheet("""
-            QFrame {
-                background-color: rgba(255, 255, 255, 240); 
-                border: 2px solid black; 
-                border-radius: 10px;
-            }
-        """)
-        
         layout = QVBoxLayout(self.export_overlay)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
         
         title = QLabel("Export Config")
-        title.setStyleSheet("font-size: 20px; font-weight: bold; color: black; border: none; background: transparent;")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; border: none; background: transparent;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         self.export_text = QTextEdit()
         self.export_text.setReadOnly(True)
-        self.export_text.setStyleSheet("border: 1px solid gray; border-radius: 4px; background: white; font-family: monospace; font-size: 12px; color: black;")
         self.export_text.setFixedHeight(120)
         
         btn_container = QHBoxLayout()
-        btn_style = """
-            QPushButton {
-                background-color: rgba(255, 255, 255, 220);
-                border: 2px solid #000000;
-                border-radius: 8px;
-                font-family: monospace;
-                font-size: 14px;
-                font-weight: bold;
-                color: #000000;
-                padding: 10px 15px;
-            }
-            QPushButton:hover { background-color: rgba(230, 230, 230, 220); }
-        """
-
         copy_btn = QPushButton("Copy to Clipboard")
-        copy_btn.setStyleSheet(btn_style)
         copy_btn.clicked.connect(self.copy_export_code)
 
         close_btn = QPushButton("Close")
-        close_btn.setStyleSheet(btn_style)
         close_btn.clicked.connect(self.export_overlay.hide)
         
         btn_container.addWidget(copy_btn)
@@ -1346,52 +2129,27 @@ class HexBoardView(QGraphicsView):
 
     def setup_import_overlay(self):
         self.import_overlay = QFrame(self)
-        self.import_overlay.setStyleSheet("""
-            QFrame {
-                background-color: rgba(255, 255, 255, 240); 
-                border: 2px solid black; 
-                border-radius: 10px;
-            }
-        """)
-        
         layout = QVBoxLayout(self.import_overlay)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
         
         title = QLabel("Import Config")
-        title.setStyleSheet("font-size: 20px; font-weight: bold; color: black; border: none; background: transparent;")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; border: none; background: transparent;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         self.import_input = QLineEdit()
         self.import_input.setPlaceholderText("Paste config code here...")
         self.import_input.setFixedHeight(40)
-        self.import_input.setStyleSheet("border: 1px solid gray; border-radius: 4px; background: white; font-family: monospace; font-size: 14px; color: black; padding: 5px;")
         
         self.import_error_label = QLabel("")
         self.import_error_label.setStyleSheet("color: red; font-size: 14px; font-weight: bold; border: none; background: transparent;")
         self.import_error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         btn_container = QHBoxLayout()
-        btn_style = """
-            QPushButton {
-                background-color: rgba(255, 255, 255, 220);
-                border: 2px solid #000000;
-                border-radius: 8px;
-                font-family: monospace;
-                font-size: 14px;
-                font-weight: bold;
-                color: #000000;
-                padding: 10px 15px;
-            }
-            QPushButton:hover { background-color: rgba(230, 230, 230, 220); }
-        """
-
         import_btn = QPushButton("Import")
-        import_btn.setStyleSheet(btn_style)
         import_btn.clicked.connect(self.process_import)
 
         cancel_btn = QPushButton("Cancel")
-        cancel_btn.setStyleSheet(btn_style)
         cancel_btn.clicked.connect(self.import_overlay.hide)
         
         btn_container.addWidget(import_btn)
@@ -1405,11 +2163,15 @@ class HexBoardView(QGraphicsView):
         self.import_overlay.resize(380, 260)
         self.import_overlay.hide()
 
-    def show_win_screen(self, winner_text):
+    def show_win_screen(self, winner_text, on_time=False):
         color_name = winner_text.split(" ")[0]
         color_hex = self.scene.color_map.get(color_name, {"base": "#000000"})["base"]
         
-        self.win_label.setText(f'<span style="color: {color_hex};">{winner_text}</span> wins!')
+        if on_time:
+            self.win_label.setText(f'<span style="color: {color_hex};">{winner_text}</span> wins on time!')
+        else:
+            self.win_label.setText(f'<span style="color: {color_hex};">{winner_text}</span> wins!')
+            
         self.overlay.show()
         self.overlay.raise_()
 
@@ -1430,6 +2192,7 @@ class HexBoardView(QGraphicsView):
         self.overlay.hide()
         self.confirm_overlay.hide()
         self.bottom_new_game_btn.hide()
+        self._current_cluster_idx = 0
         
         self.resetTransform()
         self.current_zoom = 1.0
@@ -1469,6 +2232,12 @@ class HexBoardView(QGraphicsView):
             self.import_overlay.move(ix, iy)
         
         self.update_bottom_button_pos()
+        
+        if hasattr(self, 'snap_container') and self.snap_container.isVisible():
+            self.snap_container.move(self.width() - self.snap_container.width() - 20, self.height() - self.snap_container.height() - 20)
+            
+        if hasattr(self, 'position_timer'):
+            self.position_timer()
             
         if hasattr(self, 'esc_menu') and self.esc_menu.isVisible():
             self.esc_menu.resize(self.size())
